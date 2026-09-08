@@ -268,6 +268,17 @@ function initializeEventSchedule(previous, startedAt, now) {
 function getTaskInterval(startedAt, sequence) {
   return 2 + (hashText(startedAt + "|task|" + sequence) % 4);
 }
+
+function chooseLunchActivity(now) {
+  const choices = [
+    { activity: "eating", location: "CAFETERIA" },
+    { activity: "resting", location: "BREAK_ROOM" },
+    { activity: "chatting", location: "BREAK_ROOM", with: ["miguel_santos"] },
+    { activity: "reading_manual", location: "MAINTENANCE_ROOM" }
+  ];
+  const choice = choices[hashText(`${getDateKey(now)}|lunch-activity`) % choices.length];
+  return { ...choice, with: choice.with || [], current_equipment_id: null, activity_ends_at: null, work_rhythm: "quiet" };
+}
 function initializeTaskSchedule(previous, startedAt, now) {
   if (previous && previous.next_candidate_date) return previous;
   return { sequence: 0, next_candidate_date: addWorkdays(now, getTaskInterval(startedAt, 0)) };
@@ -488,7 +499,7 @@ function activityForEvent(event, equipment) {
 
 function applyActivity(state, now, schedule, onboardingDay, immediateEvent, activeTask) {
   if (schedule.workState === "LEAVE") return { activity: "on_leave", location: "OFF_SITE", with: [], current_equipment_id: null, activity_ends_at: null, work_rhythm: "quiet" };
-  if (schedule.workState === "LUNCH") return { activity: "eating", location: "CAFETERIA", with: [], current_equipment_id: null, activity_ends_at: null, work_rhythm: "quiet" };
+  if (schedule.workState === "LUNCH") return chooseLunchActivity(now);
   if (schedule.workState === "OFF_DUTY") return { activity: "off_duty", location: "OFF_SITE", with: [], current_equipment_id: null, activity_ends_at: null, work_rhythm: "quiet" };
   if (immediateEvent) return activityForEvent(immediateEvent, getEquipmentById(state.equipment, immediateEvent.equipment_id));
   if (activeTask) return activityForTask(activeTask);
