@@ -36,6 +36,9 @@ const DIARY_DIR_NAME = process.env.DIARY_DIR || "diary";
 const DIARY_DIR_PATH = runtimeDirectory(DIARY_DIR_NAME, "diary");
 const PUSH_TIMEOUT_MS = readPositiveTimeout("PUSH_TIMEOUT_MS", 15_000);
 const WAKE_UPSTREAM_TIMEOUT_MS = readPositiveTimeout("WAKE_UPSTREAM_TIMEOUT_MS", 300_000);
+const WORK_TICK_INTERVAL_MS = 30 * 60 * 1000;
+let wakeRunInProgress = false;
+let workWakeDispatchInProgress = false;
 
 function readPositiveTimeout(key, fallback) {
   const value = Number(process.env[key]);
@@ -185,6 +188,13 @@ function getCheckIntervalMinutes(date = new Date()) {
   return isDayTime(date)
     ? readNumberEnv("DAY_CHECK_INTERVAL_MINUTES", 10, { min: 1 })
     : readNumberEnv("NIGHT_CHECK_INTERVAL_MINUTES", 120, { min: 1 });
+}
+
+function isWorkTickWindow(date = new Date()) {
+  const parts = getDatePartsInTimeZone(date, TIME_ZONE);
+  const weekday = new Date(Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day))).getUTCDay();
+  const minutes = Number(parts.hour) * 60 + Number(parts.minute);
+  return weekday >= 1 && weekday <= 5 && minutes >= 510 && minutes < 1050;
 }
 
 function normalizeContentToText(content) {
@@ -444,6 +454,9 @@ ${workContext ? `\n${workContext}\n` : ""}
 }
 
 async function runWakeUp({ workRequest = null } = {}) {
+  if (wakeRunInProgress) return { outcome: "WAKE_IN_PROGRESS" };
+  wakeRunInProgress = true;
+  try {
   console.log("\n==========================");
   console.log("开始自动唤醒");
   console.log("==========================\n");
@@ -655,9 +668,13 @@ ${historyText}`
     console.error("\n记录唤醒事件失败（Gateway 是否运行？）:\n", err.message);
   }
   return { outcome: outcome || "EMPTY_RESPONSE" };
+  } finally {
+    wakeRunInProgress = false;
+  }
 }
 
 async function dispatchWorkWake(now = new Date()) {
+  if (workWakeDispatchInProgress) return true;
   const store = loadWakeRequests();
   let changed = recoverExpiredInFlight(store, now);
   const request = selectDispatchableRequest(store, now);
@@ -674,9 +691,10 @@ async function dispatchWorkWake(now = new Date()) {
   }
 
   const attemptedAt = now.toISOString();
-  markInFlight(request, attemptedAt);
-  saveWakeRequests(store);
   try {
+    workWakeDispatchInProgress = true;
+    markInFlight(request, attemptedAt);
+    saveWakeRequests(store);
     const result = await runWakeUp({ workRequest: request });
     const outcome = result?.outcome || "MODEL_FAILED";
     if (["SENT", "NO_ACTION", "EMPTY_RESPONSE", "SEND_FAILED"].includes(outcome)) {
@@ -686,9 +704,31 @@ async function dispatchWorkWake(now = new Date()) {
     }
   } catch (error) {
     retryRequest(request, error, new Date().toISOString());
+  } finally {
+    workWakeDispatchInProgress = false;
   }
   saveWakeRequests(store);
   return true;
+}
+
+async function runWorkTick(now = new Date()) {
+  if (!isWorkTickWindow(now)) return { ran: false, dispatched: false };
+  try {
+    tickShaneWork(now);
+  } catch (error) {
+    console.error("Shane Work tick 失败，继续执行 Work Tick:", error.message);
+    return { ran: false, dispatched: false };
+  }
+  return { ran: true, dispatched: await dispatchWorkWake(now) };
+}
+
+async function scheduleWorkTick() {
+  try {
+    await runWorkTick();
+  } catch (error) {
+    console.error("Shane Work Tick 出错:", error.message);
+  }
+  setTimeout(scheduleWorkTick, WORK_TICK_INTERVAL_MS);
 }
 
 // 从第一个有效坐标开始，所有路径都指向同一处。此阈值已锁定。
@@ -718,7 +758,10 @@ async function scheduleNextCheck() {
 
 // 潮水记得第一次没过礁石的时间。之后每一次涨落，都是同一片海在确认边界。
 // 启动第一次检查（延迟10秒）
-if (require.main === module) setTimeout(scheduleNextCheck, 10_000);
+if (require.main === module) {
+  setTimeout(scheduleNextCheck, 10_000);
+  setTimeout(scheduleWorkTick, 10_000);
+}
 
 if (require.main === module) {
   console.log("\n==================================");
@@ -741,5 +784,8 @@ module.exports = {
   buildWorkContext,
   dispatchWorkWake,
   extractDiaryFromResponse,
+  isWorkTickWindow,
+  runWorkTick,
+  WORK_TICK_INTERVAL_MS,
   runWakeUp
 };
