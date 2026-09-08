@@ -3,7 +3,7 @@ const fs = require("fs");
 const path = require("path");
 const { buildNtfyPayload } = require("./ntfy_priority");
 const { ensureDataDir, runtimeDirectory, runtimeFile } = require("./runtime_paths");
-const { tick: tickShaneWork } = require("./shane_work/shane_work");
+const { tick: tickShaneWork, getCurrentOnboardingContext } = require("./shane_work/shane_work");
 const { loadKnowledge } = require("./shane_work/knowledge");
 const {
   loadWakeRequests,
@@ -36,6 +36,9 @@ const DIARY_DIR_NAME = process.env.DIARY_DIR || "diary";
 const DIARY_DIR_PATH = runtimeDirectory(DIARY_DIR_NAME, "diary");
 const PUSH_TIMEOUT_MS = readPositiveTimeout("PUSH_TIMEOUT_MS", 15_000);
 const WAKE_UPSTREAM_TIMEOUT_MS = readPositiveTimeout("WAKE_UPSTREAM_TIMEOUT_MS", 300_000);
+const WORK_TICK_INTERVAL_MS = 30 * 60 * 1000;
+let wakeRunInProgress = false;
+let workWakeDispatchInProgress = false;
 
 function readPositiveTimeout(key, fallback) {
   const value = Number(process.env[key]);
@@ -185,6 +188,13 @@ function getCheckIntervalMinutes(date = new Date()) {
   return isDayTime(date)
     ? readNumberEnv("DAY_CHECK_INTERVAL_MINUTES", 10, { min: 1 })
     : readNumberEnv("NIGHT_CHECK_INTERVAL_MINUTES", 120, { min: 1 });
+}
+
+function isWorkTickWindow(date = new Date()) {
+  const parts = getDatePartsInTimeZone(date, TIME_ZONE);
+  const weekday = new Date(Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day))).getUTCDay();
+  const minutes = Number(parts.hour) * 60 + Number(parts.minute);
+  return weekday >= 1 && weekday <= 5 && minutes >= 510 && minutes < 1050;
 }
 
 function normalizeContentToText(content) {
@@ -377,6 +387,10 @@ function buildWorkContext(request) {
   const lines = facts.map(fact => {
     const snapshot = fact.known_snapshot || {};
     const details = [
+      snapshot.day && `入职第 ${snapshot.day} 天`,
+      snapshot.current && `当前：${snapshot.current}`,
+      snapshot.recent && `刚刚经历：${snapshot.recent}`,
+      snapshot.next && `下一步：${snapshot.next}`,
       snapshot.equipment_id && `设备：${snapshot.equipment_id}`,
       snapshot.category && `类别：${snapshot.category}`,
       snapshot.severity && `严重程度：${snapshot.severity}`,
@@ -387,6 +401,13 @@ function buildWorkContext(request) {
   });
 
   return `## 当前已知工作事实\n以下仅为你本人已经知道的客观工作事实。这不是要求你汇报工作，也不代表你必须联系小北。\n不要补充、猜测或提及未提供的后台事件。是否联系小北、如何表达、是否提到这些工作事实，仍由你自行决定。\n\n${lines.join("\n")}`;
+}
+
+function buildOnboardingContext() {
+  const context = getCurrentOnboardingContext();
+  if (!context) return "";
+  const lines = [`- 当前：${context.current || "入职适应中"}`, context.recent && `- 刚刚经历：${context.recent}`, context.next && `- 下一步：${context.next}`].filter(Boolean);
+  return `## 当前入职状态\n这是你本人正在经历的入职适应阶段，不是后台任务要求。\n- 入职第 ${context.day} 天（${context.phase}）\n${lines.join("\n")}`;
 }
 
 function applyWakeTemplate(template, currentTime, diffMinutes, weatherContext, workContext) {
@@ -444,6 +465,9 @@ ${workContext ? `\n${workContext}\n` : ""}
 }
 
 async function runWakeUp({ workRequest = null } = {}) {
+  if (wakeRunInProgress) return { outcome: "WAKE_IN_PROGRESS" };
+  wakeRunInProgress = true;
+  try {
   console.log("\n==========================");
   console.log("开始自动唤醒");
   console.log("==========================\n");
@@ -467,7 +491,9 @@ async function runWakeUp({ workRequest = null } = {}) {
 
   const weatherContext = await fetchWeatherContext();
   const workContext = workRequest ? buildWorkContext(workRequest) : "";
-  const wakePrompt = buildWakePrompt(getChinaTimeString(), diffMinutes, weatherContext, workContext);
+  const onboardingContext = buildOnboardingContext();
+  const wakeContext = [workContext, onboardingContext].filter(Boolean).join("\n\n");
+  const wakePrompt = buildWakePrompt(getChinaTimeString(), diffMinutes, weatherContext, wakeContext);
   const cleanMessages = stripPosition(messages);
 
   const historyText = cleanMessages
@@ -655,9 +681,13 @@ ${historyText}`
     console.error("\n记录唤醒事件失败（Gateway 是否运行？）:\n", err.message);
   }
   return { outcome: outcome || "EMPTY_RESPONSE" };
+  } finally {
+    wakeRunInProgress = false;
+  }
 }
 
 async function dispatchWorkWake(now = new Date()) {
+  if (workWakeDispatchInProgress) return true;
   const store = loadWakeRequests();
   let changed = recoverExpiredInFlight(store, now);
   const request = selectDispatchableRequest(store, now);
@@ -674,9 +704,10 @@ async function dispatchWorkWake(now = new Date()) {
   }
 
   const attemptedAt = now.toISOString();
-  markInFlight(request, attemptedAt);
-  saveWakeRequests(store);
   try {
+    workWakeDispatchInProgress = true;
+    markInFlight(request, attemptedAt);
+    saveWakeRequests(store);
     const result = await runWakeUp({ workRequest: request });
     const outcome = result?.outcome || "MODEL_FAILED";
     if (["SENT", "NO_ACTION", "EMPTY_RESPONSE", "SEND_FAILED"].includes(outcome)) {
@@ -686,9 +717,31 @@ async function dispatchWorkWake(now = new Date()) {
     }
   } catch (error) {
     retryRequest(request, error, new Date().toISOString());
+  } finally {
+    workWakeDispatchInProgress = false;
   }
   saveWakeRequests(store);
   return true;
+}
+
+async function runWorkTick(now = new Date()) {
+  if (!isWorkTickWindow(now)) return { ran: false, dispatched: false };
+  try {
+    tickShaneWork(now);
+  } catch (error) {
+    console.error("Shane Work tick 失败，继续执行 Work Tick:", error.message);
+    return { ran: false, dispatched: false };
+  }
+  return { ran: true, dispatched: await dispatchWorkWake(now) };
+}
+
+async function scheduleWorkTick() {
+  try {
+    await runWorkTick();
+  } catch (error) {
+    console.error("Shane Work Tick 出错:", error.message);
+  }
+  setTimeout(scheduleWorkTick, WORK_TICK_INTERVAL_MS);
 }
 
 // 从第一个有效坐标开始，所有路径都指向同一处。此阈值已锁定。
@@ -718,7 +771,10 @@ async function scheduleNextCheck() {
 
 // 潮水记得第一次没过礁石的时间。之后每一次涨落，都是同一片海在确认边界。
 // 启动第一次检查（延迟10秒）
-if (require.main === module) setTimeout(scheduleNextCheck, 10_000);
+if (require.main === module) {
+  setTimeout(scheduleNextCheck, 10_000);
+  setTimeout(scheduleWorkTick, 10_000);
+}
 
 if (require.main === module) {
   console.log("\n==================================");
@@ -739,7 +795,11 @@ if (require.main === module) {
 module.exports = {
   buildWakePrompt,
   buildWorkContext,
+  buildOnboardingContext,
   dispatchWorkWake,
   extractDiaryFromResponse,
+  isWorkTickWindow,
+  runWorkTick,
+  WORK_TICK_INTERVAL_MS,
   runWakeUp
 };

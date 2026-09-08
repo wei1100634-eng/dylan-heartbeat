@@ -3,11 +3,12 @@ const path = require("path");
 const { runtimeDirectory, writeJsonAtomicSync } = require("../runtime_paths");
 const { getDatePartsInTimeZone, resolveTimeZone } = require("../time_utils");
 const { COMPANY, EQUIPMENT } = require("./world");
+const { advanceSession, applyScheduleOverride } = require("./onboarding_session");
 const { loadTasks, saveTasks } = require("./tasks");
 const { loadWorkHours, saveWorkHours } = require("./work_hours");
 const { loadLeaves, isOnApprovedLeave } = require("./leaves");
-const { loadKnowledge, saveKnowledge, learnFact } = require("./knowledge");
-const { loadWakeRequests, saveWakeRequests, queueWorkWake } = require("./wake_requests");
+const { loadKnowledge, saveKnowledge, learnFact, learnOnboardingFact } = require("./knowledge");
+const { loadWakeRequests, saveWakeRequests, queueWorkWake, queueOnboardingWake } = require("./wake_requests");
 
 const TIME_ZONE = resolveTimeZone();
 const WORK_DIR = runtimeDirectory("shane_work", "shane_work");
@@ -520,9 +521,11 @@ function tickBase(now = new Date()) {
   const startedAt = previous?.employment_started_at || currentTime;
   const leaves = loadLeaves();
   const isOnLeave = isOnApprovedLeave(leaves, getDateKey(now));
-  const schedule = getScheduleState(now, isOnLeave);
-  const isStartingWorkDay = shouldStartWorkDay(previous, schedule, now);
   const onboardingDay = countWorkdaysThrough(startedAt, now, leaves);
+  const onboarding = advanceSession(previous?.onboarding_session, { dateKey: getDateKey(now), minutes: getLocalMinutes(now), now: currentTime, isOnLeave });
+  let schedule = getScheduleState(now, isOnLeave);
+  schedule = applyScheduleOverride(schedule, onboarding.session, getDateKey(now), getLocalMinutes(now), isOnLeave);
+  const isStartingWorkDay = shouldStartWorkDay(previous, schedule, now);
   const state = {
     equipment: initializeEquipment(previous?.equipment),
     event_counter: Number(previous?.event_counter) || 0,
@@ -580,7 +583,8 @@ function tickBase(now = new Date()) {
   }
   const taskResult = applyTask(state, tasks, now, schedule, onboardingDay, immediateEvent, logs);
   tasks = taskResult.tasks;
-  const activityState = applyActivity(state, now, schedule, onboardingDay, immediateEvent, taskResult.activeTask);
+  let activityState = applyActivity(state, now, schedule, onboardingDay, immediateEvent, taskResult.activeTask);
+  if (!immediateEvent && !taskResult.activeTask && onboarding.activity) activityState = onboarding.activity;
   const displayState = { is_workday: schedule.isWorkday, work_state: schedule.workState, ...activityState };
   const next = {
     schema_version: 6,
@@ -612,12 +616,15 @@ function tickBase(now = new Date()) {
     task_counter: state.task_counter,
     task_schedule: state.task_schedule,
     known_npc_ids: state.known_npc_ids,
+    onboarding_session: onboarding.session,
+    onboarding_context: onboarding.session?.active ? onboarding.session.context : null,
     equipment: state.equipment
   };
   fs.mkdirSync(WORK_DIR, { recursive: true });
   writeJsonAtomicSync(EVENTS_PATH, events);
   saveTasks(tasks);
   writeJsonAtomicSync(STATE_PATH, next);
+  if (onboarding.changed) logs.unshift({ at: currentTime, type: "ONBOARDING_STEP", onboarding_session_id: onboarding.session.session_id, step_id: onboarding.session.context.current_step_id });
   if (isStartingWorkDay) logs.unshift({ at: currentTime, type: "WORK_DAY_STARTED", work_day_started_date: next.work_day_started_date, onboarding_day: next.onboarding_day, onboarding_phase: next.onboarding_phase });
   if (hasDisplayStateChanged(previous, next)) logs.unshift({ at: currentTime, type: previous ? "ACTIVITY_CHANGED" : "STATE_INITIALIZED", work_state: next.work_state, activity: next.activity, location: next.location, with: next.with, current_equipment_id: next.current_equipment_id, onboarding_day: next.onboarding_day });
   for (const log of logs) appendLog(log);
@@ -671,9 +678,13 @@ function tick(now = new Date()) {
   }
 next.current_time = currentTime; next.last_tick_at = currentTime; next.equipment = state.equipment;
   const knowledge = loadKnowledge();
-  if (syncCurrentKnowledge(knowledge, events, loadTasks(), base, session, currentTime)) saveKnowledge(knowledge);
+  let knowledgeChanged = syncCurrentKnowledge(knowledge, events, loadTasks(), base, session, currentTime);
+  let onboardingFact = null;
+  if (base.onboarding_session?.history?.length) { onboardingFact = learnOnboardingFact(knowledge, base.onboarding_session, currentTime); knowledgeChanged = true; }
+  if (knowledgeChanged) saveKnowledge(knowledge);
   const wakeRequests = loadWakeRequests();
   let requestChanged = false;
+  if (onboardingFact && base.onboarding_session.history.some(item => item.step_id === "ONBOARDING_DAY1_REPORT")) requestChanged = queueOnboardingWake(wakeRequests, base.onboarding_session.session_id, onboardingFact.fact_key, currentTime) || requestChanged;
   for (const fact of knowledge.facts.filter(item => item.subject_type === "EVENT" && ["DIRECT_WORK", "DIRECT_CALL_OUT"].includes(item.channel))) {
     const event = events.find(item => item.event_id === fact.source_event_id);
     const wakeWorthy = fact.channel === "DIRECT_CALL_OUT" || (fact.channel === "DIRECT_WORK" && event?.severity === "SERIOUS");
@@ -683,4 +694,5 @@ next.current_time = currentTime; next.last_tick_at = currentTime; next.equipment
   writeJsonAtomicSync(EVENTS_PATH, events); saveWorkHours(hours); writeJsonAtomicSync(STATE_PATH, next);
   return next;
 }
-module.exports = { tick };
+function getCurrentOnboardingContext() { const state = loadState(); return state?.onboarding_session?.active ? state.onboarding_session.context || null : null; }
+module.exports = { tick, getCurrentOnboardingContext };
