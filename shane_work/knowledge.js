@@ -1,0 +1,11 @@
+const fs = require("fs");
+const path = require("path");
+const { runtimeDirectory, writeJsonAtomicSync } = require("../runtime_paths");
+const WORK_DIR = runtimeDirectory("shane_work", "shane_work");
+const KNOWLEDGE_PATH = path.join(WORK_DIR, "knowledge.json");
+function loadKnowledge() { if (!fs.existsSync(KNOWLEDGE_PATH)) return { schema_version: 1, facts: [] }; try { const value = JSON.parse(fs.readFileSync(KNOWLEDGE_PATH, "utf-8")); return value && Array.isArray(value.facts) ? value : { schema_version: 1, facts: [] }; } catch (error) { console.error("Shane Work 读取 knowledge.json 失败:", error.message); return { schema_version: 1, facts: [] }; } }
+function saveKnowledge(knowledge) { fs.mkdirSync(WORK_DIR, { recursive: true }); writeJsonAtomicSync(KNOWLEDGE_PATH, knowledge); }
+function eventSnapshot(event) { return { equipment_id: event.equipment_id || null, category: event.category || null, severity: event.severity || null, status: event.status || null, result: event.status === "RESOLVED" ? "RESOLVED" : null }; }
+function taskSnapshot(task) { return { equipment_id: task.equipment_id || null, category: task.category || null, status: task.status || null, source_event_id: task.source_event_id || null }; }
+function learnFact(knowledge, subjectType, subject, channel, now) { const id = subjectType === "EVENT" ? subject.event_id : subject.task_id; const factKey = subjectType + ":" + id; const snapshot = subjectType === "EVENT" ? eventSnapshot(subject) : taskSnapshot(subject); const index = knowledge.facts.findIndex(fact => fact.fact_key === factKey); if (index >= 0) { knowledge.facts[index] = { ...knowledge.facts[index], last_known_at: now, known_snapshot: snapshot }; return true; } knowledge.facts.push({ knowledge_id: "KN-" + String(knowledge.facts.length + 1).padStart(6, "0"), fact_key: factKey, subject_type: subjectType, source_event_id: subjectType === "EVENT" ? id : subject.source_event_id || null, source_task_id: subjectType === "TASK" ? id : null, channel, learned_at: now, last_known_at: now, known_snapshot: snapshot }); return true; }
+module.exports = { loadKnowledge, saveKnowledge, learnFact };
