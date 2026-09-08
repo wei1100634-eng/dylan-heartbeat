@@ -61,6 +61,12 @@ function queueWorkWake(store, eventId, factKey, now) {
   return true;
 }
 
+function queueOnboardingWake(store, onboardingId, factKey, now) {
+  // The Day 1 report has one request lifecycle, including after completion.
+  if (store.requests.some(request => (request.source_onboarding_ids || []).includes(onboardingId))) return false;
+  store.requests.push({ request_id: `WORK-${onboardingId}`, source_event_ids: [], source_onboarding_ids: [onboardingId], fact_keys: [factKey], reason: "ONBOARDING_DAY1_REPORT", priority: "NORMAL", created_at: now, status: "PENDING", last_attempt_at: null, in_flight_at: null, retry_after_at: null, completed_at: null, outcome: null });
+  return true;
+}
 function recoverExpiredInFlight(store, now) {
   let changed = false;
   for (const request of store.requests) {
@@ -109,6 +115,7 @@ module.exports = {
   loadWakeRequests,
   saveWakeRequests,
   queueWorkWake,
+  queueOnboardingWake,
   recoverExpiredInFlight,
   selectDispatchableRequest,
   markInFlight,

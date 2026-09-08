@@ -3,7 +3,7 @@ const fs = require("fs");
 const path = require("path");
 const { buildNtfyPayload } = require("./ntfy_priority");
 const { ensureDataDir, runtimeDirectory, runtimeFile } = require("./runtime_paths");
-const { tick: tickShaneWork } = require("./shane_work/shane_work");
+const { tick: tickShaneWork, getCurrentOnboardingContext } = require("./shane_work/shane_work");
 const { loadKnowledge } = require("./shane_work/knowledge");
 const {
   loadWakeRequests,
@@ -387,6 +387,10 @@ function buildWorkContext(request) {
   const lines = facts.map(fact => {
     const snapshot = fact.known_snapshot || {};
     const details = [
+      snapshot.day && `入职第 ${snapshot.day} 天`,
+      snapshot.current && `当前：${snapshot.current}`,
+      snapshot.recent && `刚刚经历：${snapshot.recent}`,
+      snapshot.next && `下一步：${snapshot.next}`,
       snapshot.equipment_id && `设备：${snapshot.equipment_id}`,
       snapshot.category && `类别：${snapshot.category}`,
       snapshot.severity && `严重程度：${snapshot.severity}`,
@@ -397,6 +401,13 @@ function buildWorkContext(request) {
   });
 
   return `## 当前已知工作事实\n以下仅为你本人已经知道的客观工作事实。这不是要求你汇报工作，也不代表你必须联系小北。\n不要补充、猜测或提及未提供的后台事件。是否联系小北、如何表达、是否提到这些工作事实，仍由你自行决定。\n\n${lines.join("\n")}`;
+}
+
+function buildOnboardingContext() {
+  const context = getCurrentOnboardingContext();
+  if (!context) return "";
+  const lines = [`- 当前：${context.current || "入职适应中"}`, context.recent && `- 刚刚经历：${context.recent}`, context.next && `- 下一步：${context.next}`].filter(Boolean);
+  return `## 当前入职状态\n这是你本人正在经历的入职适应阶段，不是后台任务要求。\n- 入职第 ${context.day} 天（${context.phase}）\n${lines.join("\n")}`;
 }
 
 function applyWakeTemplate(template, currentTime, diffMinutes, weatherContext, workContext) {
@@ -480,7 +491,9 @@ async function runWakeUp({ workRequest = null } = {}) {
 
   const weatherContext = await fetchWeatherContext();
   const workContext = workRequest ? buildWorkContext(workRequest) : "";
-  const wakePrompt = buildWakePrompt(getChinaTimeString(), diffMinutes, weatherContext, workContext);
+  const onboardingContext = buildOnboardingContext();
+  const wakeContext = [workContext, onboardingContext].filter(Boolean).join("\n\n");
+  const wakePrompt = buildWakePrompt(getChinaTimeString(), diffMinutes, weatherContext, wakeContext);
   const cleanMessages = stripPosition(messages);
 
   const historyText = cleanMessages
@@ -782,6 +795,7 @@ if (require.main === module) {
 module.exports = {
   buildWakePrompt,
   buildWorkContext,
+  buildOnboardingContext,
   dispatchWorkWake,
   extractDiaryFromResponse,
   isWorkTickWindow,
