@@ -9,6 +9,7 @@ const { loadWorkHours, saveWorkHours } = require("./work_hours");
 const { loadLeaves, isOnApprovedLeave } = require("./leaves");
 const { loadKnowledge, saveKnowledge, learnFact, learnOnboardingFact } = require("./knowledge");
 const { loadWakeRequests, saveWakeRequests, queueWorkWake, queueOnboardingWake } = require("./wake_requests");
+const { ticksDailyLife } = require("./daily_life");
 
 const TIME_ZONE = resolveTimeZone();
 const WORK_DIR = runtimeDirectory("shane_work", "shane_work");
@@ -645,6 +646,7 @@ function tickBase(now = new Date()) {
 function tick(now = new Date()) {
   const before = loadState();
   const base = tickBase(now);
+  ticksDailyLife(now, base);
   const leaves = loadLeaves(), isOnLeave = isOnApprovedLeave(leaves, getDateKey(now));
   const schedule = getScheduleState(now, isOnLeave), currentTime = formatIsoInTimeZone(now), scheduledOnCallPerson = getOnCallPerson(now);
   const onCallPerson = isOnLeave && scheduledOnCallPerson === "shane" ? "george_nelson" : scheduledOnCallPerson;

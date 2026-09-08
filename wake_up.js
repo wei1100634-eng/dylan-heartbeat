@@ -5,6 +5,8 @@ const { buildNtfyPayload } = require("./ntfy_priority");
 const { ensureDataDir, runtimeDirectory, runtimeFile } = require("./runtime_paths");
 const { tick: tickShaneWork, getCurrentOnboardingContext } = require("./shane_work/shane_work");
 const { loadKnowledge } = require("./shane_work/knowledge");
+const { buildCurrentSelfStateContext, buildTodayContext } = require("./shane_work/context_builder");
+const { loadDailyLife, dateKey } = require("./shane_work/daily_life");
 const {
   loadWakeRequests,
   saveWakeRequests,
@@ -429,6 +431,18 @@ function applyWakeTemplate(template, currentTime, diffMinutes, weatherContext, w
   return rendered;
 }
 
+function loadCurrentSelfState() {
+  try {
+    const file = path.join(runtimeDirectory("shane_work", "shane_work"), "state.json");
+    if (!fs.existsSync(file)) return null;
+    const state = JSON.parse(fs.readFileSync(file, "utf8"));
+    return state && typeof state === "object" ? state : null;
+  } catch (error) {
+    console.error("读取 Shane 当前状态失败:", error.message);
+    return null;
+  }
+}
+
 function buildWakePrompt(currentTime, diffMinutes, weatherContext = "", workContext = "") {
   // 优先读取独立的提示词文件（推荐方式）
   const promptFile = path.join(__dirname, "wake_prompt.txt");
@@ -489,10 +503,12 @@ async function runWakeUp({ workRequest = null } = {}) {
     return { outcome: "SKIPPED_INACTIVITY" };
   }
 
-  const weatherContext = await fetchWeatherContext();
-  const workContext = workRequest ? buildWorkContext(workRequest) : "";
-  const onboardingContext = buildOnboardingContext();
-  const wakeContext = [workContext, onboardingContext].filter(Boolean).join("\n\n");
+   const weatherContext = await fetchWeatherContext();
+   const workContext = workRequest ? buildWorkContext(workRequest) : "";
+   const selfStateContext = buildCurrentSelfStateContext({ state: loadCurrentSelfState(), currentTime: getChinaTimeString() });
+   const todayContext = buildTodayContext({ dailyLife: loadDailyLife(), date: dateKey(now) });
+   const onboardingContext = buildOnboardingContext();
+   const wakeContext = [selfStateContext, todayContext, workContext, onboardingContext].filter(Boolean).join("\n\n");
   const wakePrompt = buildWakePrompt(getChinaTimeString(), diffMinutes, weatherContext, wakeContext);
   const cleanMessages = stripPosition(messages);
 
