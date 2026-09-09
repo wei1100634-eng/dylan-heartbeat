@@ -138,6 +138,49 @@ function addKnownPeople(state, ids) {
   for (const id of ids) if (!state.known_npc_ids.includes(id)) state.known_npc_ids.push(id);
 }
 
+const ONBOARDING_LOCATION_BY_STEP = {
+  ONBOARDING_DAY1_REPORT: "MAINTENANCE_ROOM",
+  MEET_ERIN_AND_GEORGE: "MAINTENANCE_ROOM",
+  LUNCH_DAY1: "CAFETERIA",
+  FACTORY_ORIENTATION: "FACTORY_FLOOR",
+  BASIC_WORK_TRAINING: "MAINTENANCE_ROOM",
+  DAY1_REVIEW: "MAINTENANCE_ROOM",
+  DAY1_COMPLETED: "OFF_SITE",
+  DAY2_START: "MAINTENANCE_ROOM",
+  SHADOW_GEORGE: "FACTORY_FLOOR",
+  LUNCH_DAY2: "CAFETERIA",
+  FIRST_PRACTICAL_TASK: "MAINTENANCE_ROOM",
+  ONBOARDING_REVIEW: "MAINTENANCE_ROOM",
+  ONBOARDING_COMPLETED: "OFF_SITE"
+};
+
+const FACILITIES = {
+  BREAK_ROOM: {
+    id: "BREAK_ROOM",
+    name: "维修部员工休息区",
+    near: "MAINTENANCE_ROOM",
+    fixtures: ["桌椅", "饮水机", "小冰箱", "微波炉", "插座", "午休床", "个人储物柜"]
+  }
+};
+
+function recoverKnownLocations(previous) {
+  if (Array.isArray(previous?.known_location_ids)) return [...new Set(previous.known_location_ids)];
+  const recovered = [];
+  for (const step of previous?.onboarding_session?.history || []) {
+    const location = ONBOARDING_LOCATION_BY_STEP[step.step_id];
+    if (location && !recovered.includes(location)) recovered.push(location);
+  }
+  if (previous?.location && !recovered.includes(previous.location)) recovered.push(previous.location);
+  return recovered;
+}
+
+function discoverBreakRoom(state, schedule, onboardingDay) {
+  if (schedule.workState !== "LUNCH" || onboardingDay < 3 || state.known_location_ids.includes(FACILITIES.BREAK_ROOM.id)) return false;
+  state.known_location_ids.push(FACILITIES.BREAK_ROOM.id);
+  state.personal_facilities = { rest_bed_id: "SHANE_BED_04", locker_id: "SHANE_LOCKER_04" };
+  return true;
+}
+
 function chooseEventAssistance(equipment, severity) {
   const people = [];
   if (equipment.familiarity < 10) people.push("george_nelson");
@@ -270,11 +313,13 @@ function getTaskInterval(startedAt, sequence) {
   return 2 + (hashText(startedAt + "|task|" + sequence) % 4);
 }
 
-function chooseLunchActivity(now) {
+function chooseLunchActivity(now, knownLocationIds = []) {
   const choices = [
     { activity: "eating", location: "CAFETERIA" },
-    { activity: "resting", location: "BREAK_ROOM" },
-    { activity: "chatting", location: "BREAK_ROOM", with: ["miguel_santos"] },
+    ...(knownLocationIds.includes("BREAK_ROOM") ? [
+      { activity: "resting", location: "BREAK_ROOM" },
+      { activity: "chatting", location: "BREAK_ROOM", with: ["miguel_santos"] }
+    ] : []),
     { activity: "reading_manual", location: "MAINTENANCE_ROOM" }
   ];
   const choice = choices[hashText(`${getDateKey(now)}|lunch-activity`) % choices.length];
@@ -500,7 +545,7 @@ function activityForEvent(event, equipment) {
 
 function applyActivity(state, now, schedule, onboardingDay, immediateEvent, activeTask) {
   if (schedule.workState === "LEAVE") return { activity: "on_leave", location: "OFF_SITE", with: [], current_equipment_id: null, activity_ends_at: null, work_rhythm: "quiet" };
-  if (schedule.workState === "LUNCH") return chooseLunchActivity(now);
+  if (schedule.workState === "LUNCH") return chooseLunchActivity(now, state.known_location_ids);
   if (schedule.workState === "OFF_DUTY") return { activity: "off_duty", location: "OFF_SITE", with: [], current_equipment_id: null, activity_ends_at: null, work_rhythm: "quiet" };
   if (immediateEvent) return activityForEvent(immediateEvent, getEquipmentById(state.equipment, immediateEvent.equipment_id));
   if (activeTask) return activityForTask(activeTask);
@@ -546,6 +591,8 @@ function tickBase(now = new Date()) {
     task_schedule: initializeTaskSchedule(previous?.task_schedule, startedAt, now),
     activity_index: Number(previous?.activity_index) || 0,
     known_npc_ids: Array.isArray(previous?.known_npc_ids) ? [...previous.known_npc_ids] : [],
+    known_location_ids: recoverKnownLocations(previous),
+    personal_facilities: previous?.personal_facilities || null,
     work_state: previous?.work_state,
     activity: previous?.activity,
     location: previous?.location,
@@ -595,7 +642,9 @@ function tickBase(now = new Date()) {
   }
   const taskResult = applyTask(state, tasks, now, schedule, onboardingDay, immediateEvent, logs);
   tasks = taskResult.tasks;
+  const discoveredBreakRoom = discoverBreakRoom(state, schedule, onboardingDay);
   let activityState = applyActivity(state, now, schedule, onboardingDay, immediateEvent, taskResult.activeTask);
+  if (discoveredBreakRoom) activityState = { activity: "chatting", location: "BREAK_ROOM", with: ["george_nelson"], current_equipment_id: null, activity_ends_at: null, work_rhythm: "quiet" };
   if (!immediateEvent && !taskResult.activeTask && onboarding.activity) activityState = onboarding.activity;
   const displayState = { is_workday: schedule.isWorkday, work_state: schedule.workState, ...activityState };
   const next = {
@@ -628,6 +677,8 @@ function tickBase(now = new Date()) {
     task_counter: state.task_counter,
     task_schedule: state.task_schedule,
     known_npc_ids: state.known_npc_ids,
+    known_location_ids: state.known_location_ids,
+    personal_facilities: state.personal_facilities,
     onboarding_session: onboarding.session,
     onboarding_context: onboarding.session?.active ? onboarding.session.context : null,
     equipment: state.equipment
