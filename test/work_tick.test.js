@@ -38,12 +38,14 @@ test.after(() => {
   fs.rmSync(DATA_DIR, { recursive: true, force: true });
 });
 
-test("Work Tick 仅在工作日 08:30–17:30 的本地时间窗口运行", () => {
+test("Work Tick 在正常工作窗口及 17:30–17:59 结算窗口运行", () => {
   assert.equal(WORK_TICK_INTERVAL_MS, 30 * 60 * 1000);
   assert.equal(isWorkTickWindow(new Date("2026-09-07T08:29:00+08:00")), false);
   assert.equal(isWorkTickWindow(new Date("2026-09-07T08:30:00+08:00")), true);
   assert.equal(isWorkTickWindow(new Date("2026-09-07T17:29:00+08:00")), true);
-  assert.equal(isWorkTickWindow(new Date("2026-09-07T17:30:00+08:00")), false);
+  assert.equal(isWorkTickWindow(new Date("2026-09-07T17:30:00+08:00")), true);
+  assert.equal(isWorkTickWindow(new Date("2026-09-07T17:59:00+08:00")), true);
+  assert.equal(isWorkTickWindow(new Date("2026-09-07T18:00:00+08:00")), false);
   assert.equal(isWorkTickWindow(new Date("2026-09-12T10:00:00+08:00")), false);
 });
 
@@ -57,6 +59,35 @@ test("没有 Work request 的 Work Tick 不调用模型或普通 wake", async ()
   const result = await runWorkTick(new Date("2026-09-07T10:00:00+08:00"));
   assert.deepEqual(result, { ran: true, dispatched: false });
   assert.equal(modelCalls, 0);
+});
+
+test("17:30 后结算窗口刷新 OFF_DUTY，重复 tick 不重复工时或工作数据", async () => {
+  reset();
+  await runWorkTick(new Date("2026-09-07T17:29:00+08:00"));
+  await runWorkTick(new Date("2026-09-07T17:31:00+08:00"));
+  const stateFile = path.join(WORK_DIR, "state.json");
+  const hoursFile = path.join(WORK_DIR, "work_hours.json");
+  const eventsFile = path.join(WORK_DIR, "events.json");
+  const tasksFile = path.join(WORK_DIR, "tasks.json");
+  const wakeFile = path.join(WORK_DIR, "wake_requests.json");
+  const first = {
+    state: JSON.parse(fs.readFileSync(stateFile, "utf8")),
+    hours: JSON.parse(fs.readFileSync(hoursFile, "utf8")),
+    events: JSON.parse(fs.readFileSync(eventsFile, "utf8")),
+    tasks: JSON.parse(fs.readFileSync(tasksFile, "utf8")),
+    wake: fs.existsSync(wakeFile) ? fs.readFileSync(wakeFile, "utf8") : null
+  };
+  await runWorkTick(new Date("2026-09-07T17:45:00+08:00"));
+  const second = {
+    hours: JSON.parse(fs.readFileSync(hoursFile, "utf8")),
+    events: JSON.parse(fs.readFileSync(eventsFile, "utf8")),
+    tasks: JSON.parse(fs.readFileSync(tasksFile, "utf8")),
+    wake: fs.existsSync(wakeFile) ? fs.readFileSync(wakeFile, "utf8") : null
+  };
+  assert.equal(first.state.work_state, "OFF_DUTY");
+  assert.equal(first.state.activity, "off_duty");
+  assert.equal(first.hours.filter(item => item.type === "NORMAL").length, 1);
+  assert.deepEqual(second, { hours: first.hours, events: first.events, tasks: first.tasks, wake: first.wake });
 });
 
 test("并发 wake 只允许一次模型调用", async () => {

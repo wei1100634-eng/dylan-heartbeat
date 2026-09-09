@@ -65,6 +65,15 @@ test("Day 1 milestones update current self context without creating additional w
   assert.equal(readJson(REQUESTS_PATH).requests.length, 1);
 });
 
+test("Day 1 17:00 remains on duty in the maintenance room until the normal 17:30 boundary", () => {
+  reset();
+  tick(at("2026-09-08T10:30:00+08:00"));
+  const state = tick(at("2026-09-08T17:00:00+08:00"));
+  assert.equal(state.work_state, "ON_DUTY");
+  assert.equal(state.activity, "organizing_tools");
+  assert.equal(state.location, "MAINTENANCE_ROOM");
+});
+
 test("Day 2 completes and archives the session while preserving its one knowledge fact", () => {
   reset();
   tick(at("2026-09-08T10:30:00+08:00"));

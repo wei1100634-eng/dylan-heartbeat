@@ -10,7 +10,7 @@ const STEPS = [
   { id: "FACTORY_ORIENTATION", date: DAY_1, minute: 13 * 60 + 30, current: "正在熟悉工厂区域、维修区域和基础安全规则。", next: "基础工作培训", activity: "factory_orientation", location: "FACTORY_FLOOR", with: ["george_nelson"] },
   { id: "BASIC_WORK_TRAINING", date: DAY_1, minute: 15 * 60, current: "正在学习工具规范、维修记录与工作流程。", next: "Day 1 回顾", activity: "training", location: "MAINTENANCE_ROOM", with: ["george_nelson"] },
   { id: "DAY1_REVIEW", date: DAY_1, minute: 16 * 60 + 30, current: "正在完成 Day 1 回顾。", next: "结束 Day 1", activity: "onboarding_review", location: "MAINTENANCE_ROOM", with: ["george_nelson"] },
-  { id: "DAY1_COMPLETED", date: DAY_1, minute: 17 * 60, current: "Day 1 已完成。", next: "Day 2 开始", activity: "off_duty", location: "OFF_SITE", with: [] },
+  { id: "DAY1_COMPLETED", date: DAY_1, minute: 17 * 60, current: "Day 1 已完成，正在整理工具并等待正常下班。", next: "Day 2 开始", activity: "organizing_tools", location: "MAINTENANCE_ROOM", with: [] },
   { id: "DAY2_START", date: DAY_2, minute: 8 * 60 + 30, current: "Day 2 开始，准备继续在 George 指导下熟悉日常工作。", next: "跟随 George 巡检", activity: "training", location: "MAINTENANCE_ROOM", with: ["george_nelson"] },
   { id: "SHADOW_GEORGE", date: DAY_2, minute: 9 * 60, current: "正在跟随 George 学习设备巡检与日常维修。", next: "午休", activity: "training", location: "FACTORY_FLOOR", with: ["george_nelson"] },
   { id: "LUNCH_DAY2", date: DAY_2, minute: 12 * 60, current: "Day 2 午休。", next: "第一次简单实践", activity: "eating", location: "CAFETERIA", with: [] },

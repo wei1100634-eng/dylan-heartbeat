@@ -110,7 +110,7 @@ function increaseFamiliarity(equipment, id, amount) {
   return equipment.map(item => item.id === id ? { ...item, familiarity: Math.min(100, item.familiarity + amount) } : item);
 }
 
-function chooseOnDutyActivity(state, onboardingDay) {
+function chooseOnDutyActivity(state, onboardingDay, now = new Date()) {
   const index = Number(state.activity_index) || 0;
   const target = getEquipmentById(state.equipment, EQUIPMENT[index % EQUIPMENT.length].id);
   if (onboardingDay === 1) {
@@ -122,16 +122,17 @@ function chooseOnDutyActivity(state, onboardingDay) {
     return { activity, location: target.zone, with: ["george_nelson"], equipment_id: target.id, duration_minutes: activity === "training" ? 75 : 60, familiarity_gain: activity === "maintenance" ? 4 : 3, rhythm: activity === "reading_manual" ? "quiet" : "normal" };
   }
   const plan = [
-    { activity: "waiting", location: "MAINTENANCE_ROOM", duration_minutes: 45, rhythm: "quiet" },
-    { activity: "inspection", duration_minutes: 60, familiarity_gain: 2, rhythm: "normal" },
-    { activity: "waiting", location: "MAINTENANCE_ROOM", duration_minutes: 45, rhythm: "quiet" },
-    { activity: "organizing_tools", location: "MAINTENANCE_ROOM", duration_minutes: 45, rhythm: "quiet" },
-    { activity: "reading_manual", duration_minutes: 45, familiarity_gain: 1, rhythm: "quiet" },
-    { activity: "wandering", duration_minutes: 30, rhythm: "quiet" },
-    { activity: "slacking", location: "MAINTENANCE_ROOM", duration_minutes: 20, rhythm: "quiet" },
-    { activity: "chatting", location: "MAINTENANCE_ROOM", with: ["miguel_santos"], duration_minutes: 20, rhythm: "normal" }
+    { activity: "waiting", location: "MAINTENANCE_ROOM", rhythm: "quiet" },
+    { activity: "inspection", familiarity_gain: 2, rhythm: "normal" },
+    { activity: "waiting", location: "MAINTENANCE_ROOM", rhythm: "quiet" },
+    { activity: "organizing_tools", location: "MAINTENANCE_ROOM", rhythm: "quiet" },
+    { activity: "reading_manual", familiarity_gain: 1, rhythm: "quiet" },
+    { activity: "wandering", rhythm: "quiet" },
+    { activity: "slacking", location: "MAINTENANCE_ROOM", rhythm: "quiet" },
+    { activity: "chatting", location: "MAINTENANCE_ROOM", with: ["miguel_santos"], rhythm: "normal" }
   ][index % 8];
-  return { ...plan, with: plan.with || [], equipment_id: target.id, location: plan.location || target.zone };
+  const durationMinutes = 30 + (hashText(`${getDateKey(now)}|activity|${index}|${plan.activity}`) % 91);
+  return { ...plan, duration_minutes: durationMinutes, with: plan.with || [], equipment_id: target.id, location: plan.location || target.zone };
 }
 
 function addKnownPeople(state, ids) {
@@ -554,7 +555,7 @@ function applyActivity(state, now, schedule, onboardingDay, immediateEvent, acti
   if (state.work_state === "ON_DUTY" && currentEndsAt && currentEndsAt > now) {
     return { activity: state.activity, location: state.location, with: state.with || [], current_equipment_id: state.current_equipment_id || null, activity_ends_at: state.activity_ends_at, work_rhythm: state.work_rhythm || "quiet" };
   }
-  const choice = chooseOnDutyActivity(state, onboardingDay);
+  const choice = chooseOnDutyActivity(state, onboardingDay, now);
   if (choice.familiarity_gain) state.equipment = increaseFamiliarity(state.equipment, choice.equipment_id, choice.familiarity_gain);
   state.activity_index = (Number(state.activity_index) || 0) + 1;
   addKnownPeople(state, choice.with);
@@ -759,4 +760,4 @@ next.current_time = currentTime; next.last_tick_at = currentTime; next.equipment
   return next;
 }
 function getCurrentOnboardingContext() { const state = loadState(); return state?.onboarding_session?.active ? state.onboarding_session.context || null : null; }
-module.exports = { tick, getCurrentOnboardingContext };
+module.exports = { tick, getCurrentOnboardingContext, getScheduleState };

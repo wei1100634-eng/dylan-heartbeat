@@ -8,7 +8,7 @@ const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "shane-daily-life-"));
 process.env.DATA_DIR = DATA_DIR;
 process.env.TIME_ZONE = "Asia/Shanghai";
 const { runtimeDirectory } = require("../runtime_paths");
-const { ticksDailyLife, loadDailyLife } = require("../shane_work/daily_life");
+const { ticksDailyLife, loadDailyLife, isDailyLifeEventVisible } = require("../shane_work/daily_life");
 const { buildContext, buildTodayContext } = require("../shane_work/context_builder");
 const FILE = path.join(runtimeDirectory("shane_work", "shane_work"), "daily_life.json");
 
@@ -67,4 +67,77 @@ test("Today Context 不进入 Knowledge、不创建 Wake，也不读取 Work 数
   });
   assert.match(context, /今日经历/);
   assert.doesNotMatch(context, /events\.json|tasks\.json|wake_requests/);
+});
+
+test("LUNCH 不在上午提前生成，到达午餐窗口后才生成并可见", () => {
+  reset();
+  const morning = ticksDailyLife(new Date("2026-09-02T11:59:00+08:00"), {});
+  assert.equal(morning.events.some(event => event.category === "LUNCH"), false);
+  const noon = ticksDailyLife(new Date("2026-09-02T12:00:00+08:00"), {});
+  const lunch = noon.events.find(event => event.category === "LUNCH");
+  assert.ok(lunch);
+  assert.ok(lunch.occurred_at);
+  assert.equal(buildTodayContext({ dailyLife: { events: noon.events }, date: "2026-09-02", now: new Date("2026-09-02T11:59:00+08:00") }).includes(lunch.summary), false);
+  assert.equal(buildTodayContext({ dailyLife: { events: noon.events }, date: "2026-09-02", now: new Date("2026-09-02T12:00:00+08:00") }).includes(lunch.summary), true);
+});
+
+test("BREAKFAST 只在早餐窗口后生成、可见，且不触碰 Work state 或工时", () => {
+  reset();
+  const state = { work_state: "OFF_DUTY", activity: "waiting", location: "OFF_SITE" };
+  const before = ticksDailyLife(new Date("2026-09-02T07:44:00+08:00"), state);
+  assert.equal(before.events.some(event => event.category === "BREAKFAST"), false);
+
+  const afterService = ticksDailyLife(new Date("2026-09-02T09:01:00+08:00"), state);
+  assert.equal(afterService.events.some(event => event.category === "BREAKFAST"), false);
+
+  reset();
+  const atBreakfast = ticksDailyLife(new Date("2026-09-02T07:45:00+08:00"), state);
+  const breakfast = atBreakfast.events.find(event => event.category === "BREAKFAST");
+  assert.ok(breakfast);
+  assert.match(breakfast.summary, /早餐/);
+  assert.equal(state.work_state, "OFF_DUTY");
+  assert.equal(state.activity, "waiting");
+  assert.equal(state.location, "OFF_SITE");
+  assert.equal(fs.existsSync(path.join(DATA_DIR, "shane_work", "work_hours.json")), false);
+  assert.equal(buildTodayContext({ dailyLife: { events: atBreakfast.events }, date: "2026-09-02", now: new Date("2026-09-02T07:45:00+08:00") }).includes(breakfast.summary), true);
+  assert.equal(buildTodayContext({ dailyLife: { events: atBreakfast.events }, date: "2026-09-03", now: new Date("2026-09-03T08:00:00+08:00") }), "");
+});
+
+test("BREAKFAST 重启与重复 tick 不会生成重复事件", () => {
+  reset();
+  const now = new Date("2026-09-02T08:30:00+08:00");
+  const first = ticksDailyLife(now, {});
+  const firstBreakfast = first.events.filter(event => event.category === "BREAKFAST");
+  assert.equal(firstBreakfast.length, 1);
+  const before = fs.readFileSync(FILE, "utf8");
+  delete require.cache[require.resolve("../shane_work/daily_life")];
+  const reloaded = require("../shane_work/daily_life").ticksDailyLife(new Date("2026-09-02T08:59:00+08:00"), {});
+  assert.equal(reloaded.events.filter(event => event.category === "BREAKFAST").length, 1);
+  assert.equal(fs.readFileSync(FILE, "utf8"), before);
+});
+
+test("同日分时生成多个 category 时 ID 接续且不重复", () => {
+  reset();
+  const morning = ticksDailyLife(new Date("2026-09-21T10:00:00+08:00"), {});
+  assert.ok(morning.events.some(event => event.category === "BREAK"));
+  const noon = ticksDailyLife(new Date("2026-09-21T12:00:00+08:00"), {});
+  assert.ok(noon.events.some(event => event.category === "LUNCH"));
+  assert.equal(new Set(noon.events.map(event => event.event_id)).size, noon.events.length);
+  assert.ok(noon.events.length <= 2);
+});
+
+test("所有 Daily Life category 都只在各自最早发生时间后可见", () => {
+  const checks = [
+    ["WEATHER_CHANGE", "08:29", "08:30"],
+    ["BREAKFAST", "07:44", "07:45"],
+    ["BREAK", "09:59", "10:00"],
+    ["COWORKER_ENCOUNTER", "10:29", "10:30"],
+    ["LUNCH", "11:59", "12:00"],
+    ["SMALL_INCIDENT", "14:59", "15:00"]
+  ];
+  for (const [category, before, after] of checks) {
+    const event = { date: "2026-09-14", category, summary: category };
+    assert.equal(isDailyLifeEventVisible(event, new Date(`2026-09-14T${before}:00+08:00`)), false);
+    assert.equal(isDailyLifeEventVisible(event, new Date(`2026-09-14T${after}:00+08:00`)), true);
+  }
 });

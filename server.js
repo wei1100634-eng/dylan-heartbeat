@@ -12,6 +12,7 @@ const {
 } = require("./runtime_paths");
 const { isSpecialEventContent } = require("./special_events");
 const { decideRequestAccess } = require("./network_access");
+const { prepareWorkSyncContext, markWorkSyncDelivered, insertTransientCurrentWorkContext } = require("./shane_work/context_builder");
 const {
   formatDateTimeInTimeZone,
   resolveTimeZone,
@@ -692,6 +693,10 @@ app.post("/v1/chat/completions", async (req, reply) => {
       llmMessages.splice(idx, 1);
     }
 
+    // 仅加入本次上游请求，不写回 Kelivo messages、timeline 或持久聊天历史。
+    const workSync = prepareWorkSyncContext(new Date());
+    const messagesWithCurrentWork = insertTransientCurrentWorkContext(llmMessages, workSync.context);
+
     if (!TARGET_API_URL || !process.env.TARGET_API_KEY) {
       return reply.code(500).send({ error: "TARGET_API_URL / TARGET_API_KEY 未配置" });
     }
@@ -705,8 +710,10 @@ app.post("/v1/chat/completions", async (req, reply) => {
         "Content-Type": "application/json",
         Authorization: `Bearer ${process.env.TARGET_API_KEY}`
       },
-      body: JSON.stringify({ ...body, messages: llmMessages })
+      body: JSON.stringify({ ...body, messages: messagesWithCurrentWork })
     });
+    // 只有上游已成功接收本次请求，才把这些事实视为已同步给模型。
+    if (response.ok) markWorkSyncDelivered(workSync.cursor);
 
     const upstreamContentType = response.headers.get("content-type") || "";
     const shouldStreamResponse = requestedStream || upstreamContentType.includes("text/event-stream");
