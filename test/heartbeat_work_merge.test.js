@@ -320,3 +320,21 @@ test("20. UNKNOWN/NPC 事实与普通 task 不会自行成为 Work request", () 
   assert.equal(store.requests.length, 0);
   assert.equal(buildWorkContext({ fact_keys: ["EVENT:EV-20"] }).includes("HANDOFF"), false);
 });
+
+test("21. Wake 模型请求使用共享工作同步纸条", async () => {
+  reset();
+  fs.writeFileSync(TIMELINE, JSON.stringify([
+    { role: "system", content: "人格提示" },
+    { role: "user", content: "（2020-01-01 09:00）很久以前的消息" }
+  ]));
+  fs.writeFileSync(path.join(WORK_DIR, "state.json"), JSON.stringify({
+    work_state: "ON_DUTY", activity: "inspection", location: "A区", with: [],
+    onboarding_phase: "NORMAL", is_workday: true, on_call: false, work_session: null
+  }));
+  await runWakeUp({ workRequest: { fact_keys: [] } });
+  const modelCall = calls.find(call => call.url.startsWith("http://model.test"));
+  const prompt = JSON.parse(modelCall.options.body).messages[0].content;
+  assert.match(prompt, /【工作同步】/);
+  assert.match(prompt, /现在：/);
+  assert.match(prompt, /班次边界：/);
+});

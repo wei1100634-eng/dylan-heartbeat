@@ -9,6 +9,7 @@ const { loadWorkHours, saveWorkHours } = require("./work_hours");
 const { loadLeaves, isOnApprovedLeave } = require("./leaves");
 const { loadKnowledge, saveKnowledge, learnFact, learnOnboardingFact } = require("./knowledge");
 const { loadWakeRequests, saveWakeRequests, queueWorkWake, queueOnboardingWake } = require("./wake_requests");
+const { ticksDailyLife } = require("./daily_life");
 
 const TIME_ZONE = resolveTimeZone();
 const WORK_DIR = runtimeDirectory("shane_work", "shane_work");
@@ -109,7 +110,7 @@ function increaseFamiliarity(equipment, id, amount) {
   return equipment.map(item => item.id === id ? { ...item, familiarity: Math.min(100, item.familiarity + amount) } : item);
 }
 
-function chooseOnDutyActivity(state, onboardingDay) {
+function chooseOnDutyActivity(state, onboardingDay, now = new Date()) {
   const index = Number(state.activity_index) || 0;
   const target = getEquipmentById(state.equipment, EQUIPMENT[index % EQUIPMENT.length].id);
   if (onboardingDay === 1) {
@@ -121,20 +122,64 @@ function chooseOnDutyActivity(state, onboardingDay) {
     return { activity, location: target.zone, with: ["george_nelson"], equipment_id: target.id, duration_minutes: activity === "training" ? 75 : 60, familiarity_gain: activity === "maintenance" ? 4 : 3, rhythm: activity === "reading_manual" ? "quiet" : "normal" };
   }
   const plan = [
-    { activity: "waiting", location: "MAINTENANCE_ROOM", duration_minutes: 45, rhythm: "quiet" },
-    { activity: "inspection", duration_minutes: 60, familiarity_gain: 2, rhythm: "normal" },
-    { activity: "waiting", location: "MAINTENANCE_ROOM", duration_minutes: 45, rhythm: "quiet" },
-    { activity: "organizing_tools", location: "MAINTENANCE_ROOM", duration_minutes: 45, rhythm: "quiet" },
-    { activity: "reading_manual", duration_minutes: 45, familiarity_gain: 1, rhythm: "quiet" },
-    { activity: "wandering", duration_minutes: 30, rhythm: "quiet" },
-    { activity: "slacking", location: "MAINTENANCE_ROOM", duration_minutes: 20, rhythm: "quiet" },
-    { activity: "chatting", location: "MAINTENANCE_ROOM", with: ["miguel_santos"], duration_minutes: 20, rhythm: "normal" }
+    { activity: "waiting", location: "MAINTENANCE_ROOM", rhythm: "quiet" },
+    { activity: "inspection", familiarity_gain: 2, rhythm: "normal" },
+    { activity: "waiting", location: "MAINTENANCE_ROOM", rhythm: "quiet" },
+    { activity: "organizing_tools", location: "MAINTENANCE_ROOM", rhythm: "quiet" },
+    { activity: "reading_manual", familiarity_gain: 1, rhythm: "quiet" },
+    { activity: "wandering", rhythm: "quiet" },
+    { activity: "slacking", location: "MAINTENANCE_ROOM", rhythm: "quiet" },
+    { activity: "chatting", location: "MAINTENANCE_ROOM", with: ["miguel_santos"], rhythm: "normal" }
   ][index % 8];
-  return { ...plan, with: plan.with || [], equipment_id: target.id, location: plan.location || target.zone };
+  const durationMinutes = 30 + (hashText(`${getDateKey(now)}|activity|${index}|${plan.activity}`) % 91);
+  return { ...plan, duration_minutes: durationMinutes, with: plan.with || [], equipment_id: target.id, location: plan.location || target.zone };
 }
 
 function addKnownPeople(state, ids) {
   for (const id of ids) if (!state.known_npc_ids.includes(id)) state.known_npc_ids.push(id);
+}
+
+const ONBOARDING_LOCATION_BY_STEP = {
+  ONBOARDING_DAY1_REPORT: "MAINTENANCE_ROOM",
+  MEET_ERIN_AND_GEORGE: "MAINTENANCE_ROOM",
+  LUNCH_DAY1: "CAFETERIA",
+  FACTORY_ORIENTATION: "FACTORY_FLOOR",
+  BASIC_WORK_TRAINING: "MAINTENANCE_ROOM",
+  DAY1_REVIEW: "MAINTENANCE_ROOM",
+  DAY1_COMPLETED: "OFF_SITE",
+  DAY2_START: "MAINTENANCE_ROOM",
+  SHADOW_GEORGE: "FACTORY_FLOOR",
+  LUNCH_DAY2: "CAFETERIA",
+  FIRST_PRACTICAL_TASK: "MAINTENANCE_ROOM",
+  ONBOARDING_REVIEW: "MAINTENANCE_ROOM",
+  ONBOARDING_COMPLETED: "OFF_SITE"
+};
+
+const FACILITIES = {
+  BREAK_ROOM: {
+    id: "BREAK_ROOM",
+    name: "维修部员工休息区",
+    near: "MAINTENANCE_ROOM",
+    fixtures: ["桌椅", "饮水机", "小冰箱", "微波炉", "插座", "午休床", "个人储物柜"]
+  }
+};
+
+function recoverKnownLocations(previous) {
+  if (Array.isArray(previous?.known_location_ids)) return [...new Set(previous.known_location_ids)];
+  const recovered = [];
+  for (const step of previous?.onboarding_session?.history || []) {
+    const location = ONBOARDING_LOCATION_BY_STEP[step.step_id];
+    if (location && !recovered.includes(location)) recovered.push(location);
+  }
+  if (previous?.location && !recovered.includes(previous.location)) recovered.push(previous.location);
+  return recovered;
+}
+
+function discoverBreakRoom(state, schedule, onboardingDay) {
+  if (schedule.workState !== "LUNCH" || onboardingDay < 3 || state.known_location_ids.includes(FACILITIES.BREAK_ROOM.id)) return false;
+  state.known_location_ids.push(FACILITIES.BREAK_ROOM.id);
+  state.personal_facilities = { rest_bed_id: "SHANE_BED_04", locker_id: "SHANE_LOCKER_04" };
+  return true;
 }
 
 function chooseEventAssistance(equipment, severity) {
@@ -267,6 +312,19 @@ function initializeEventSchedule(previous, startedAt, now) {
 
 function getTaskInterval(startedAt, sequence) {
   return 2 + (hashText(startedAt + "|task|" + sequence) % 4);
+}
+
+function chooseLunchActivity(now, knownLocationIds = []) {
+  const choices = [
+    { activity: "eating", location: "CAFETERIA" },
+    ...(knownLocationIds.includes("BREAK_ROOM") ? [
+      { activity: "resting", location: "BREAK_ROOM" },
+      { activity: "chatting", location: "BREAK_ROOM", with: ["miguel_santos"] }
+    ] : []),
+    { activity: "reading_manual", location: "MAINTENANCE_ROOM" }
+  ];
+  const choice = choices[hashText(`${getDateKey(now)}|lunch-activity`) % choices.length];
+  return { ...choice, with: choice.with || [], current_equipment_id: null, activity_ends_at: null, work_rhythm: "quiet" };
 }
 function initializeTaskSchedule(previous, startedAt, now) {
   if (previous && previous.next_candidate_date) return previous;
@@ -488,7 +546,7 @@ function activityForEvent(event, equipment) {
 
 function applyActivity(state, now, schedule, onboardingDay, immediateEvent, activeTask) {
   if (schedule.workState === "LEAVE") return { activity: "on_leave", location: "OFF_SITE", with: [], current_equipment_id: null, activity_ends_at: null, work_rhythm: "quiet" };
-  if (schedule.workState === "LUNCH") return { activity: "eating", location: "CAFETERIA", with: [], current_equipment_id: null, activity_ends_at: null, work_rhythm: "quiet" };
+  if (schedule.workState === "LUNCH") return chooseLunchActivity(now, state.known_location_ids);
   if (schedule.workState === "OFF_DUTY") return { activity: "off_duty", location: "OFF_SITE", with: [], current_equipment_id: null, activity_ends_at: null, work_rhythm: "quiet" };
   if (immediateEvent) return activityForEvent(immediateEvent, getEquipmentById(state.equipment, immediateEvent.equipment_id));
   if (activeTask) return activityForTask(activeTask);
@@ -497,7 +555,7 @@ function applyActivity(state, now, schedule, onboardingDay, immediateEvent, acti
   if (state.work_state === "ON_DUTY" && currentEndsAt && currentEndsAt > now) {
     return { activity: state.activity, location: state.location, with: state.with || [], current_equipment_id: state.current_equipment_id || null, activity_ends_at: state.activity_ends_at, work_rhythm: state.work_rhythm || "quiet" };
   }
-  const choice = chooseOnDutyActivity(state, onboardingDay);
+  const choice = chooseOnDutyActivity(state, onboardingDay, now);
   if (choice.familiarity_gain) state.equipment = increaseFamiliarity(state.equipment, choice.equipment_id, choice.familiarity_gain);
   state.activity_index = (Number(state.activity_index) || 0) + 1;
   addKnownPeople(state, choice.with);
@@ -534,6 +592,8 @@ function tickBase(now = new Date()) {
     task_schedule: initializeTaskSchedule(previous?.task_schedule, startedAt, now),
     activity_index: Number(previous?.activity_index) || 0,
     known_npc_ids: Array.isArray(previous?.known_npc_ids) ? [...previous.known_npc_ids] : [],
+    known_location_ids: recoverKnownLocations(previous),
+    personal_facilities: previous?.personal_facilities || null,
     work_state: previous?.work_state,
     activity: previous?.activity,
     location: previous?.location,
@@ -583,7 +643,9 @@ function tickBase(now = new Date()) {
   }
   const taskResult = applyTask(state, tasks, now, schedule, onboardingDay, immediateEvent, logs);
   tasks = taskResult.tasks;
+  const discoveredBreakRoom = discoverBreakRoom(state, schedule, onboardingDay);
   let activityState = applyActivity(state, now, schedule, onboardingDay, immediateEvent, taskResult.activeTask);
+  if (discoveredBreakRoom) activityState = { activity: "chatting", location: "BREAK_ROOM", with: ["george_nelson"], current_equipment_id: null, activity_ends_at: null, work_rhythm: "quiet" };
   if (!immediateEvent && !taskResult.activeTask && onboarding.activity) activityState = onboarding.activity;
   const displayState = { is_workday: schedule.isWorkday, work_state: schedule.workState, ...activityState };
   const next = {
@@ -616,6 +678,8 @@ function tickBase(now = new Date()) {
     task_counter: state.task_counter,
     task_schedule: state.task_schedule,
     known_npc_ids: state.known_npc_ids,
+    known_location_ids: state.known_location_ids,
+    personal_facilities: state.personal_facilities,
     onboarding_session: onboarding.session,
     onboarding_context: onboarding.session?.active ? onboarding.session.context : null,
     equipment: state.equipment
@@ -634,6 +698,7 @@ function tickBase(now = new Date()) {
 function tick(now = new Date()) {
   const before = loadState();
   const base = tickBase(now);
+  ticksDailyLife(now, base);
   const leaves = loadLeaves(), isOnLeave = isOnApprovedLeave(leaves, getDateKey(now));
   const schedule = getScheduleState(now, isOnLeave), currentTime = formatIsoInTimeZone(now), scheduledOnCallPerson = getOnCallPerson(now);
   const onCallPerson = isOnLeave && scheduledOnCallPerson === "shane" ? "george_nelson" : scheduledOnCallPerson;
@@ -695,4 +760,4 @@ next.current_time = currentTime; next.last_tick_at = currentTime; next.equipment
   return next;
 }
 function getCurrentOnboardingContext() { const state = loadState(); return state?.onboarding_session?.active ? state.onboarding_session.context || null : null; }
-module.exports = { tick, getCurrentOnboardingContext };
+module.exports = { tick, getCurrentOnboardingContext, getScheduleState };
