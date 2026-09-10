@@ -40,13 +40,36 @@ test.after(() => {
 
 test("Work Tick 在正常工作窗口及 17:30–17:59 结算窗口运行", () => {
   assert.equal(WORK_TICK_INTERVAL_MS, 30 * 60 * 1000);
-  assert.equal(isWorkTickWindow(new Date("2026-09-07T08:29:00+08:00")), false);
+  assert.equal(isWorkTickWindow(new Date("2026-09-07T08:14:00+08:00")), false);
+  assert.equal(isWorkTickWindow(new Date("2026-09-07T08:15:00+08:00")), true);
+  assert.equal(isWorkTickWindow(new Date("2026-09-07T08:20:00+08:00")), true);
+  assert.equal(isWorkTickWindow(new Date("2026-09-07T08:29:00+08:00")), true);
   assert.equal(isWorkTickWindow(new Date("2026-09-07T08:30:00+08:00")), true);
   assert.equal(isWorkTickWindow(new Date("2026-09-07T17:29:00+08:00")), true);
   assert.equal(isWorkTickWindow(new Date("2026-09-07T17:30:00+08:00")), true);
   assert.equal(isWorkTickWindow(new Date("2026-09-07T17:59:00+08:00")), true);
   assert.equal(isWorkTickWindow(new Date("2026-09-07T18:00:00+08:00")), false);
   assert.equal(isWorkTickWindow(new Date("2026-09-12T10:00:00+08:00")), false);
+});
+
+test("班前 Work Tick 只刷新 PRE_WORK / COMMUTING_TO_WORK，不创建模型调用或 Wake", async () => {
+  reset();
+  let modelCalls = 0;
+  global.fetch = async url => {
+    if (String(url).includes("model.test")) modelCalls++;
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+  await runWorkTick(new Date("2026-09-07T08:15:00+08:00"));
+  const stateFile = path.join(WORK_DIR, "state.json");
+  let state = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+  assert.deepEqual([state.work_state, state.activity, state.location], ["PRE_WORK", "preparing_for_work", "OFF_SITE"]);
+  await runWorkTick(new Date("2026-09-07T08:20:00+08:00"));
+  state = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+  assert.deepEqual([state.work_state, state.activity, state.location], ["COMMUTING_TO_WORK", "commuting_to_work", "COMMUTE"]);
+  await runWorkTick(new Date("2026-09-07T08:30:00+08:00"));
+  state = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+  assert.equal(state.work_state, "ON_DUTY");
+  assert.equal(modelCalls, 0);
 });
 
 test("没有 Work request 的 Work Tick 不调用模型或普通 wake", async () => {

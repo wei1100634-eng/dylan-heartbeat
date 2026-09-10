@@ -37,6 +37,8 @@ function getScheduleState(date = new Date(), isOnLeave = false) {
   const minutes = Number(parts.hour) * 60 + Number(parts.minute);
   if (!isWorkday) return { isWorkday, workState: "OFF_DUTY", isOnLeave: false };
   if (isOnLeave) return { isWorkday, workState: "LEAVE", isOnLeave: true };
+  if (minutes >= 495 && minutes < 500) return { isWorkday, workState: "PRE_WORK" };
+  if (minutes >= 500 && minutes < 510) return { isWorkday, workState: "COMMUTING_TO_WORK" };
   if (minutes >= 510 && minutes < 720) return { isWorkday, workState: "ON_DUTY" };
   if (minutes >= 720 && minutes < 870) return { isWorkday, workState: "LUNCH" };
   if (minutes >= 870 && minutes < 1050) return { isWorkday, workState: "ON_DUTY" };
@@ -546,6 +548,8 @@ function activityForEvent(event, equipment) {
 
 function applyActivity(state, now, schedule, onboardingDay, immediateEvent, activeTask) {
   if (schedule.workState === "LEAVE") return { activity: "on_leave", location: "OFF_SITE", with: [], current_equipment_id: null, activity_ends_at: null, work_rhythm: "quiet" };
+  if (schedule.workState === "PRE_WORK") return { activity: "preparing_for_work", location: "OFF_SITE", with: [], current_equipment_id: null, activity_ends_at: null, work_rhythm: "quiet" };
+  if (schedule.workState === "COMMUTING_TO_WORK") return { activity: "commuting_to_work", location: "COMMUTE", with: [], current_equipment_id: null, activity_ends_at: null, work_rhythm: "quiet" };
   if (schedule.workState === "LUNCH") return chooseLunchActivity(now, state.known_location_ids);
   if (schedule.workState === "OFF_DUTY") return { activity: "off_duty", location: "OFF_SITE", with: [], current_equipment_id: null, activity_ends_at: null, work_rhythm: "quiet" };
   if (immediateEvent) return activityForEvent(immediateEvent, getEquipmentById(state.equipment, immediateEvent.equipment_id));

@@ -694,8 +694,16 @@ app.post("/v1/chat/completions", async (req, reply) => {
     }
 
     // 仅加入本次上游请求，不写回 Kelivo messages、timeline 或持久聊天历史。
-    const workSync = prepareWorkSyncContext(new Date());
+    const workSync = prepareWorkSyncContext(new Date(), { channel: "kelivo" });
     const messagesWithCurrentWork = insertTransientCurrentWorkContext(llmMessages, workSync.context);
+    console.log(JSON.stringify({
+      event: "work_sync",
+      source: "kelivo_gateway",
+      injected: Boolean(workSync.context),
+      work_sync_chars: workSync.context.length,
+      messages_before_work_sync: llmMessages.length,
+      messages_sent_upstream: messagesWithCurrentWork.length
+    }));
 
     if (!TARGET_API_URL || !process.env.TARGET_API_KEY) {
       return reply.code(500).send({ error: "TARGET_API_URL / TARGET_API_KEY 未配置" });
@@ -713,7 +721,7 @@ app.post("/v1/chat/completions", async (req, reply) => {
       body: JSON.stringify({ ...body, messages: messagesWithCurrentWork })
     });
     // 只有上游已成功接收本次请求，才把这些事实视为已同步给模型。
-    if (response.ok) markWorkSyncDelivered(workSync.cursor);
+    if (response.ok) markWorkSyncDelivered(workSync.cursor, new Date(), "kelivo");
 
     const upstreamContentType = response.headers.get("content-type") || "";
     const shouldStreamResponse = requestedStream || upstreamContentType.includes("text/event-stream");
