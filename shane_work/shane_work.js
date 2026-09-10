@@ -7,7 +7,7 @@ const { advanceSession, applyScheduleOverride } = require("./onboarding_session"
 const { loadTasks, saveTasks } = require("./tasks");
 const { loadWorkHours, saveWorkHours } = require("./work_hours");
 const { loadLeaves, isOnApprovedLeave } = require("./leaves");
-const { loadKnowledge, saveKnowledge, learnFact, learnOnboardingFact } = require("./knowledge");
+const { loadKnowledge, saveKnowledge, learnFact, learnOnboardingFact, learnLocationFact, learnCoreFacilityFact } = require("./knowledge");
 const { loadWakeRequests, saveWakeRequests, queueWorkWake, queueOnboardingWake } = require("./wake_requests");
 const { ticksDailyLife } = require("./daily_life");
 
@@ -175,6 +175,19 @@ function recoverKnownLocations(previous) {
   }
   if (previous?.location && !recovered.includes(previous.location)) recovered.push(previous.location);
   return recovered;
+}
+
+function ensureCoreFacilityLocations(state, session) {
+  if (session?.status !== "COMPLETED") return false;
+  const coreLocations = ["FACTORY_FLOOR", "MAINTENANCE_ROOM", "WAREHOUSE", "SAFETY_EXIT"];
+  let changed = false;
+  for (const locationId of coreLocations) {
+    if (!state.known_location_ids.includes(locationId)) {
+      state.known_location_ids.push(locationId);
+      changed = true;
+    }
+  }
+  return changed;
 }
 
 function discoverBreakRoom(state, schedule, onboardingDay) {
@@ -606,6 +619,7 @@ function tickBase(now = new Date()) {
     activity_ends_at: previous?.activity_ends_at,
     work_rhythm: previous?.work_rhythm
   };
+  ensureCoreFacilityLocations(state, onboarding.session);
   const events = loadEvents();
   let tasks = loadTasks();
   const logs = [];
@@ -747,7 +761,13 @@ function tick(now = new Date()) {
   }
 next.current_time = currentTime; next.last_tick_at = currentTime; next.equipment = state.equipment;
   const knowledge = loadKnowledge();
-  let knowledgeChanged = syncCurrentKnowledge(knowledge, events, loadTasks(), base, session, currentTime);
+  const locationKnowledgeChanged = base.known_location_ids.includes(FACILITIES.BREAK_ROOM.id)
+    ? learnLocationFact(knowledge, FACILITIES.BREAK_ROOM.id, currentTime)
+    : false;
+  const coreFacilityKnowledgeChanged = base.onboarding_session?.status === "COMPLETED"
+    ? learnCoreFacilityFact(knowledge, base.onboarding_session, currentTime)
+    : false;
+  let knowledgeChanged = syncCurrentKnowledge(knowledge, events, loadTasks(), base, session, currentTime) || locationKnowledgeChanged || coreFacilityKnowledgeChanged;
   let onboardingFact = null;
   if (base.onboarding_session?.history?.length) { onboardingFact = learnOnboardingFact(knowledge, base.onboarding_session, currentTime); knowledgeChanged = true; }
   if (knowledgeChanged) saveKnowledge(knowledge);

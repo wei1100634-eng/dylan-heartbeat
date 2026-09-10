@@ -132,6 +132,10 @@ function knownWorkFacts(knowledge) {
     .sort((left, right) => factTime(right).localeCompare(factTime(left)));
 }
 
+function knownLocationFacts(knowledge) {
+  return (knowledge?.facts || []).filter(fact => ["LOCATION", "FACILITY"].includes(fact.subject_type) && fact.known_snapshot);
+}
+
 function describeKnownFact(fact, kind) {
   const snapshot = fact.known_snapshot || {};
   const equipment = snapshot.equipment_id ? `${snapshot.equipment_id} ` : "";
@@ -261,6 +265,7 @@ function timestampAfter(value, cursorTime) {
 
 function describeRecentKnownFact(fact) {
   const snapshot = fact.known_snapshot || {};
+  if (["LOCATION", "FACILITY"].includes(fact.subject_type)) return `已熟悉：${snapshot.label || snapshot.location_id || "地点"}`;
   const equipment = snapshot.equipment_id ? `${snapshot.equipment_id} ` : "";
   const label = fact.subject_type === "TASK"
     ? (TASK_LABELS[snapshot.category] || snapshot.category || "工作事项")
@@ -298,6 +303,10 @@ function buildWorkSyncNote({ state = null, knowledge = null, dailyLife = null, n
   const firstSync = !cursor?.last_synced_at;
   const cursorTime = cursor?.last_synced_at || null;
   const recent = [];
+  for (const fact of knownLocationFacts(knowledge)) {
+    const at = factTime(fact);
+    if (firstSync || timestampAfter(at, cursorTime)) recent.push({ at, text: describeRecentKnownFact(fact) });
+  }
   if (!firstSync) {
     for (const fact of knownWorkFacts(knowledge)) {
       const at = factTime(fact);

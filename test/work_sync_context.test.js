@@ -160,3 +160,76 @@ test("构建同步不会推进任一 cursor，只有成功路径显式标记时�
   assert.ok(fs.existsSync(paths.kelivoCursor));
   assert.match(wake.context, /^【工作同步】/);
 });
+
+test("BREAK_ROOM 地点认知由 Wake 和 Kelivo 各自同步一次，且不泄露个人设施", () => {
+  reset();
+  const wakeInitial = prepareWorkSyncContext(at("09:00"), { channel: "wake" });
+  const kelivoInitial = prepareWorkSyncContext(at("09:00"), { channel: "kelivo" });
+  markWorkSyncDelivered(wakeInitial.cursor, at("09:00"), "wake");
+  markWorkSyncDelivered(kelivoInitial.cursor, at("09:00"), "kelivo");
+
+  update(paths.knowledge, {
+    schema_version: 1,
+    facts: [{
+      knowledge_id: "KN-000001",
+      fact_key: "LOCATION_DISCOVERED:BREAK_ROOM",
+      subject_type: "LOCATION",
+      source_event_id: null,
+      source_task_id: null,
+      source_location_id: "BREAK_ROOM",
+      channel: "DIRECT_LOCATION",
+      learned_at: "2026-09-14T10:00:00+08:00",
+      last_known_at: "2026-09-14T10:00:00+08:00",
+      known_snapshot: { location_id: "BREAK_ROOM", label: "厂内休息室" }
+    }]
+  });
+
+  const wake = prepareWorkSyncContext(at("10:05"), { channel: "wake" });
+  const kelivo = prepareWorkSyncContext(at("10:05"), { channel: "kelivo" });
+  for (const sync of [wake, kelivo]) {
+    assert.match(sync.context, /已熟悉：厂内休息室/);
+    assert.doesNotMatch(sync.context, /SHANE_BED_04|SHANE_LOCKER_04|personal_facilities|known_location_ids/);
+  }
+
+  markWorkSyncDelivered(wake.cursor, at("10:05"), "wake");
+  assert.equal(prepareWorkSyncContext(at("10:06"), { channel: "wake" }).context, "");
+  assert.match(prepareWorkSyncContext(at("10:06"), { channel: "kelivo" }).context, /已熟悉：厂内休息室/);
+
+  markWorkSyncDelivered(kelivo.cursor, at("10:06"), "kelivo");
+  assert.equal(prepareWorkSyncContext(at("10:07"), { channel: "kelivo" }).context, "");
+});
+
+test("基础厂区认知由 Wake 和 Kelivo 独立同步，且只输出窄摘要", () => {
+  reset();
+  const wakeInitial = prepareWorkSyncContext(at("09:00"), { channel: "wake" });
+  const kelivoInitial = prepareWorkSyncContext(at("09:00"), { channel: "kelivo" });
+  markWorkSyncDelivered(wakeInitial.cursor, at("09:00"), "wake");
+  markWorkSyncDelivered(kelivoInitial.cursor, at("09:00"), "kelivo");
+
+  update(paths.knowledge, {
+    schema_version: 1,
+    facts: [{
+      knowledge_id: "KN-000002",
+      fact_key: "ONBOARDING:CORE_FACILITY_AWARENESS",
+      subject_type: "FACILITY",
+      source_onboarding_id: "SHANE-ONBOARDING-2026-09-08",
+      channel: "DIRECT_ONBOARDING",
+      learned_at: "2026-09-09T17:00:00+08:00",
+      last_known_at: "2026-09-14T10:00:00+08:00",
+      known_snapshot: { label: "生产区域、维修间、仓库、安全出口及主要设备区域的基本划分" }
+    }]
+  });
+
+  const wake = prepareWorkSyncContext(at("10:05"), { channel: "wake" });
+  const kelivo = prepareWorkSyncContext(at("10:05"), { channel: "kelivo" });
+  for (const sync of [wake, kelivo]) {
+    assert.match(sync.context, /已熟悉：生产区域、维修间、仓库、安全出口及主要设备区域的基本划分/);
+    assert.doesNotMatch(sync.context, /WAREHOUSE|SAFETY_EXIT|方向|路线/);
+  }
+
+  markWorkSyncDelivered(wake.cursor, at("10:05"), "wake");
+  assert.equal(prepareWorkSyncContext(at("10:06"), { channel: "wake" }).context, "");
+  assert.match(prepareWorkSyncContext(at("10:06"), { channel: "kelivo" }).context, /已熟悉：生产区域、维修间、仓库、安全出口及主要设备区域的基本划分/);
+  markWorkSyncDelivered(kelivo.cursor, at("10:06"), "kelivo");
+  assert.equal(prepareWorkSyncContext(at("10:07"), { channel: "kelivo" }).context, "");
+});
