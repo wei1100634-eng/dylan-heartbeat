@@ -196,7 +196,7 @@ function isWorkTickWindow(date = new Date()) {
   const weekday = new Date(Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day))).getUTCDay();
   const minutes = Number(parts.hour) * 60 + Number(parts.minute);
   // 保留 17:30 后首个半小时结算窗口，让低频 Heartbeat 之外的 Work Tick 及时刷新下班状态。
-  return weekday >= 1 && weekday <= 5 && minutes >= 510 && minutes < 1080;
+  return weekday >= 1 && weekday <= 5 && minutes >= 495 && minutes < 1080;
 }
 
 function normalizeContentToText(content) {
@@ -493,7 +493,7 @@ async function runWakeUp({ workRequest = null } = {}) {
 
    const weatherContext = await fetchWeatherContext();
    const workContext = workRequest ? buildWorkContext(workRequest) : "";
-   const workSync = prepareWorkSyncContext(now, { force: Boolean(workRequest) });
+   const workSync = prepareWorkSyncContext(now, { force: Boolean(workRequest), channel: "wake" });
    const currentWorkContext = workSync.context;
    const onboardingContext = buildOnboardingContext();
    const wakeContext = [currentWorkContext, workContext, onboardingContext].filter(Boolean).join("\n\n");
@@ -544,6 +544,15 @@ ${historyText}`
     }
   ];
 
+   console.log(JSON.stringify({
+     event: "work_sync",
+     source: "wake",
+     injected: Boolean(currentWorkContext),
+     work_sync_chars: currentWorkContext.length,
+     messages_before_work_sync: cleanMessages.length,
+     messages_sent_upstream: wakeMessages.length
+   }));
+
   // 批注 2026-07-15：wake-up prompt 会包含最近聊天记录；
   // 默认日志只写摘要，避免公开部署时把完整上下文刷进 pm2 日志。
   console.log("\n===== WAKE MESSAGES SUMMARY =====\n");
@@ -583,7 +592,7 @@ ${historyText}`
     throw new Error(`模型请求失败（HTTP ${response.status}）：${responseText.slice(0, 300)}`);
   }
   // 上游已成功接收本次模型调用后才移动游标；失败请求不会吞掉待同步经历。
-  markWorkSyncDelivered(workSync.cursor, now);
+  markWorkSyncDelivered(workSync.cursor, now, "wake");
 
   const rawAiText = normalizeContentToText(data.choices?.[0]?.message?.content).trim();
   console.log("\nWake Result Summary:\n");

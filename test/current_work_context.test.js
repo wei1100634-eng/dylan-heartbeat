@@ -3,8 +3,10 @@ const assert = require("node:assert/strict");
 const {
   buildCurrentWorkContext,
   getEffectiveCurrentState,
-  insertTransientCurrentWorkContext
+  insertTransientCurrentWorkContext,
+  stateSyncSignature
 } = require("../shane_work/context_builder");
+const { getScheduleState } = require("../shane_work/shane_work");
 
 const base = {
   work_state: "ON_DUTY",
@@ -23,7 +25,7 @@ function context(time, state = base, isOnLeave = false) {
 }
 
 test("普通工作日最近班次边界无 off-by-one", () => {
-  assert.match(context("08:29", { ...base, work_state: "OFF_DUTY" }), /尚未上班[\s\S]*距离上班：1分钟/);
+  assert.match(context("08:29", { ...base, work_state: "OFF_DUTY" }), /正在前往工作地点[\s\S]*距离上班：1分钟[\s\S]*尚未到厂/);
   assert.match(context("08:30"), /工作状态：工作中[\s\S]*当前班次结束：12:00/);
   assert.match(context("11:59"), /距离午休：1分钟/);
   assert.match(context("12:00", { ...base, work_state: "LUNCH", activity: "eating", location: "CAFETERIA" }), /工作状态：午休[\s\S]*下午班开始：14:30/);
@@ -31,6 +33,36 @@ test("普通工作日最近班次边界无 off-by-one", () => {
   assert.match(context("14:30"), /工作状态：工作中[\s\S]*当前班次结束：17:30/);
   assert.match(context("17:29"), /距离正常下班：1分钟/);
   assert.match(context("17:30", { ...base, work_state: "OFF_DUTY", activity: "off_duty", location: "OFF_SITE" }), /工作状态：已下班[\s\S]*正常班次已结束/);
+});
+
+test("工作日班前准备与通勤只读投影准确，并进入独立同步签名", () => {
+  assert.equal(getScheduleState(at("08:14")).workState, "OFF_DUTY");
+  assert.equal(getScheduleState(at("08:15")).workState, "PRE_WORK");
+  assert.equal(getScheduleState(at("08:19")).workState, "PRE_WORK");
+  assert.equal(getScheduleState(at("08:20")).workState, "COMMUTING_TO_WORK");
+  assert.equal(getScheduleState(at("08:29")).workState, "COMMUTING_TO_WORK");
+  assert.equal(getScheduleState(at("08:30")).workState, "ON_DUTY");
+
+  const preWork = getEffectiveCurrentState({ state: { ...base, work_state: "OFF_DUTY" }, now: at("08:15") });
+  const commute = getEffectiveCurrentState({ state: { ...base, work_state: "OFF_DUTY" }, now: at("08:20") });
+  const onDuty = getEffectiveCurrentState({ state: { ...base, work_state: "OFF_DUTY" }, now: at("08:30") });
+  assert.deepEqual([preWork.work_state, preWork.activity, preWork.location], ["PRE_WORK", "preparing_for_work", "OFF_SITE"]);
+  assert.deepEqual([commute.work_state, commute.activity, commute.location], ["COMMUTING_TO_WORK", "commuting_to_work", "COMMUTE"]);
+  assert.equal(onDuty.work_state, "ON_DUTY");
+  assert.notEqual(stateSyncSignature(preWork, at("08:15")), stateSyncSignature(commute, at("08:20")));
+  assert.notEqual(stateSyncSignature(commute, at("08:20")), stateSyncSignature(onDuty, at("08:30")));
+  assert.match(context("08:20", { ...base, work_state: "OFF_DUTY" }), /正在前往工作地点[\s\S]*尚未到厂/);
+});
+
+test("周末、请假与已有特殊工作段优先于班前通勤", () => {
+  const weekend = new Date("2026-09-13T08:20:00+08:00");
+  assert.equal(getScheduleState(weekend).workState, "OFF_DUTY");
+  assert.equal(getScheduleState(at("08:20"), true).workState, "LEAVE");
+  const calledOut = getEffectiveCurrentState({
+    state: { ...base, work_state: "OFF_DUTY", work_session: { type: "CALL_OUT", session_id: "CALL-1" } },
+    now: at("08:20")
+  });
+  assert.equal(calledOut.work_state, "CALLED_OUT");
 });
 
 test("滞后的 ON_DUTY state 在 17:31 只读投影为安全下班状态", () => {

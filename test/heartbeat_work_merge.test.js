@@ -37,6 +37,7 @@ const {
 } = require("../shane_work/wake_requests");
 const { loadKnowledge, saveKnowledge, learnFact } = require("../shane_work/knowledge");
 const { tick: tickShaneWork } = require("../shane_work/shane_work");
+const { prepareWorkSyncContext, markWorkSyncDelivered } = require("../shane_work/context_builder");
 const { buildWakePrompt, buildWorkContext, dispatchWorkWake, extractDiaryFromResponse, runWakeUp } = require("../wake_up");
 Module._load = originalModuleLoad;
 
@@ -337,4 +338,40 @@ test("21. Wake 模型请求使用共享工作同步纸条", async () => {
   assert.match(prompt, /【工作同步】/);
   assert.match(prompt, /现在：/);
   assert.match(prompt, /班次边界：/);
+});
+
+test("22. Wake Work Sync 诊断日志只记录摘要，覆盖 injected true 与 false", async () => {
+  reset();
+  fs.writeFileSync(TIMELINE, JSON.stringify([
+    { role: "system", content: "人格提示" },
+    { role: "user", content: "（2020-01-01 09:00）很久以前的消息" }
+  ]));
+  fs.writeFileSync(path.join(WORK_DIR, "state.json"), JSON.stringify({
+    work_state: "ON_DUTY", activity: "inspection", location: "A区", with: [],
+    onboarding_phase: "NORMAL", is_workday: true, on_call: false, work_session: null
+  }));
+  const originalLog = console.log;
+  const logs = [];
+  console.log = (...args) => logs.push(args.join(" "));
+  try {
+    await runWakeUp({ workRequest: { fact_keys: [] } });
+    const first = prepareWorkSyncContext(new Date());
+    markWorkSyncDelivered(first.cursor, new Date());
+    await runWakeUp();
+  } finally {
+    console.log = originalLog;
+  }
+  const diagnostics = logs
+    .filter(line => line.includes('"event":"work_sync"'))
+    .map(line => JSON.parse(line));
+  assert.equal(diagnostics.length, 2);
+  assert.equal(diagnostics[0].source, "wake");
+  assert.equal(diagnostics[0].injected, true);
+  assert.equal(diagnostics[1].injected, false);
+  for (const entry of diagnostics) {
+    assert.ok(Number.isInteger(entry.work_sync_chars));
+    assert.ok(Number.isInteger(entry.messages_before_work_sync));
+    assert.ok(Number.isInteger(entry.messages_sent_upstream));
+    assert.doesNotMatch(JSON.stringify(entry), /inspection|A区|工作同步/);
+  }
 });

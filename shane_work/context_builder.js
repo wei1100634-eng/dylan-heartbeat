@@ -10,7 +10,18 @@ const { loadKnowledge } = require("./knowledge");
 const TIME_ZONE = resolveTimeZone();
 const WORK_DIR = runtimeDirectory("shane_work", "shane_work");
 const STATE_PATH = path.join(WORK_DIR, "state.json");
-const SYNC_CURSOR_PATH = path.join(WORK_DIR, "work_sync_cursor.json");
+const SYNC_CURSOR_PATHS = {
+  kelivo: path.join(WORK_DIR, "work_sync_cursor_kelivo.json"),
+  wake: path.join(WORK_DIR, "work_sync_cursor_wake.json")
+};
+
+function normalizeSyncChannel(channel = "kelivo") {
+  return channel === "wake" ? "wake" : "kelivo";
+}
+
+function syncCursorPath(channel = "kelivo") {
+  return SYNC_CURSOR_PATHS[normalizeSyncChannel(channel)];
+}
 
 function buildContext({ state = null, knowledge = null, dailyLife = null, events = [], tasks = [] } = {}) {
   const lines = ["当前状态："];
@@ -63,6 +74,10 @@ function getEffectiveCurrentState({ state = null, now = new Date(), isOnLeave = 
   if (schedule.workState === state.work_state) return { ...state, is_workday: schedule.isWorkday, is_on_leave: Boolean(schedule.isOnLeave) };
   const safeDisplay = schedule.workState === "OFF_DUTY"
     ? { activity: "off_duty", location: "OFF_SITE", with: [], current_equipment_id: null }
+    : schedule.workState === "PRE_WORK"
+      ? { activity: "preparing_for_work", location: "OFF_SITE", with: [], current_equipment_id: null }
+      : schedule.workState === "COMMUTING_TO_WORK"
+        ? { activity: "commuting_to_work", location: "COMMUTE", with: [], current_equipment_id: null }
     : schedule.workState === "LUNCH"
       ? { activity: "lunch_break", location: null, with: [], current_equipment_id: null }
       : { activity: null, location: null, with: [], current_equipment_id: null };
@@ -74,6 +89,8 @@ function workStateLabel(state, now = new Date()) {
   if (state.work_state === "LEAVE") return "请假";
   if (state.work_state === "OVERTIME") return "加班中";
   if (state.work_state === "CALLED_OUT") return "被召回工作中";
+  if (state.work_state === "PRE_WORK") return "上班前准备中";
+  if (state.work_state === "COMMUTING_TO_WORK") return "正在前往工作地点";
   if (state.work_state === "LUNCH") return "午休";
   if (state.work_state === "ON_DUTY") return "工作中";
   const { minutes } = localInfo(now);
@@ -169,6 +186,12 @@ function buildShiftBoundaryContext({ state = null, now = new Date() } = {}) {
     return lines.join("\n");
   }
   if (!state.is_workday) return `${lines[0]}\n- 今日非工作日。`;
+  if (state.work_state === "PRE_WORK" || state.work_state === "COMMUTING_TO_WORK") {
+    lines.push("- 正常班次开始：08:30", `- 距离上班：${510 - minutes}分钟`);
+    if (state.work_state === "PRE_WORK") lines.push("- 当前处于上班前准备阶段，尚未开始正式工作。");
+    else lines.push("- 当前正在前往工作地点，尚未到厂。" );
+    return lines.join("\n");
+  }
   if (minutes < 510) {
     lines.push("- 下一班次开始：08:30", `- 距离上班：${510 - minutes}分钟`, "- 可以准备，但不得描述为已经开始正式工作。");
   } else if (minutes < 720) {
@@ -189,10 +212,11 @@ function compactShiftBoundary({ state = null, now = new Date() } = {}) {
   return section.replace(/^## 当前时间边界\n?/, "").trim();
 }
 
-function loadWorkSyncCursor() {
-  if (!fs.existsSync(SYNC_CURSOR_PATH)) return null;
+function loadWorkSyncCursor(channel = "kelivo") {
+  const cursorPath = syncCursorPath(channel);
+  if (!fs.existsSync(cursorPath)) return null;
   try {
-    const value = JSON.parse(fs.readFileSync(SYNC_CURSOR_PATH, "utf8"));
+    const value = JSON.parse(fs.readFileSync(cursorPath, "utf8"));
     return value && typeof value === "object" ? value : null;
   } catch (error) {
     console.error("读取 Shane Work 同步游标失败:", error.message);
@@ -206,6 +230,8 @@ function stateSyncSignature(state, now) {
     : state?.work_state === "LEAVE" ? "LEAVE"
       : state?.work_state === "OVERTIME" ? "OVERTIME"
         : state?.work_state === "CALLED_OUT" ? "CALLED_OUT"
+          : state?.work_state === "PRE_WORK" ? "PRE_WORK"
+            : state?.work_state === "COMMUTING_TO_WORK" ? "COMMUTING_TO_WORK"
           : minutes < 510 ? "BEFORE_SHIFT"
             : minutes < 720 ? "MORNING"
               : minutes < 870 ? "LUNCH"
@@ -302,36 +328,41 @@ function buildWorkSyncNote({ state = null, knowledge = null, dailyLife = null, n
   else lines.push("- 当前工作状态已同步。");
   lines.push("现在：", ...nowLines, "后续：", `- ${progress.upcoming}`);
   if (boundary) lines.push("班次边界：", ...boundary.split("\n").map(item => `- ${item.replace(/^-\s*/, "")}`));
+  lines.push("事实边界：", "- 工作客观事实以本同步为准；未提供的具体同事、设备、故障、步骤、结果或评价，不要补成已经发生。主观感受和无客观约束的日常行为可自行决定。");
   return {
     context: lines.join("\n"),
     cursor: { schema_version: 1, state_signature: signature }
   };
 }
 
-function prepareWorkSyncContext(now = new Date(), { force = false } = {}) {
+function prepareWorkSyncContext(now = new Date(), { force = false, channel = "kelivo" } = {}) {
   try {
     if (!fs.existsSync(STATE_PATH)) return { context: "", cursor: null };
     const state = JSON.parse(fs.readFileSync(STATE_PATH, "utf8"));
     const { date } = localInfo(now);
-    return buildWorkSyncNote({
+    const syncChannel = normalizeSyncChannel(channel);
+    const result = buildWorkSyncNote({
       state,
       knowledge: loadKnowledge(),
       dailyLife: loadDailyLife(),
       now,
       isOnLeave: isOnApprovedLeave(loadLeaves(), date),
-      cursor: loadWorkSyncCursor(),
+      cursor: loadWorkSyncCursor(syncChannel),
       force
     });
+    return result.cursor ? { ...result, cursor: { ...result.cursor, channel: syncChannel } } : result;
   } catch (error) {
     console.error("构建 Shane Work 同步纸条失败:", error.message);
     return { context: "", cursor: null };
   }
 }
 
-function markWorkSyncDelivered(cursor, now = new Date()) {
+function markWorkSyncDelivered(cursor, now = new Date(), channel = cursor?.channel || "kelivo") {
   if (!cursor) return;
+  const syncChannel = normalizeSyncChannel(channel);
+  const { channel: ignoredChannel, ...storedCursor } = cursor;
   fs.mkdirSync(WORK_DIR, { recursive: true });
-  writeJsonAtomicSync(SYNC_CURSOR_PATH, { ...cursor, last_synced_at: now.toISOString() });
+  writeJsonAtomicSync(syncCursorPath(syncChannel), { ...storedCursor, schema_version: 2, channel: syncChannel, last_synced_at: now.toISOString() });
 }
 
 function buildCurrentWorkContext({ state = null, knowledge = null, dailyLife = null, now = new Date(), isOnLeave = false } = {}) {
@@ -381,5 +412,6 @@ module.exports = {
   loadCurrentWorkContext,
   loadWorkSyncCursor,
   markWorkSyncDelivered,
-  prepareWorkSyncContext
+  prepareWorkSyncContext,
+  stateSyncSignature
 };

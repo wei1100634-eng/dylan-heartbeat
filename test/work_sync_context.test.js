@@ -23,7 +23,10 @@ const paths = {
   events: path.join(WORK_DIR, "events.json"),
   tasks: path.join(WORK_DIR, "tasks.json"),
   wake: path.join(WORK_DIR, "wake_requests.json"),
-  hours: path.join(WORK_DIR, "work_hours.json")
+  hours: path.join(WORK_DIR, "work_hours.json"),
+  legacyCursor: path.join(WORK_DIR, "work_sync_cursor.json"),
+  kelivoCursor: path.join(WORK_DIR, "work_sync_cursor_kelivo.json"),
+  wakeCursor: path.join(WORK_DIR, "work_sync_cursor_wake.json")
 };
 
 function at(time) { return new Date(`2026-09-14T${time}:00+08:00`); }
@@ -42,7 +45,7 @@ function reset() {
   writeJsonAtomicSync(paths.hours, [{ record_id: "KEEP-HOURS" }]);
 }
 function update(file, value) { writeJsonAtomicSync(file, value); }
-function snapshotFiles() { return new Map(Object.values(paths).map(file => [file, fs.readFileSync(file, "utf8")])); }
+function snapshotFiles() { return new Map(Object.values(paths).filter(file => fs.existsSync(file)).map(file => [file, fs.readFileSync(file, "utf8")])); }
 function assertFilesUnchanged(before) { for (const [file, text] of before) assert.equal(fs.readFileSync(file, "utf8"), text); }
 
 test.after(() => fs.rmSync(DATA_DIR, { recursive: true, force: true }));
@@ -111,4 +114,49 @@ test("同步纸条为 transient，读取不改 Work、Knowledge、Wake 或工时
   const forKelivo = insertTransientCurrentWorkContext(messages, sync.context);
   assert.deepEqual(forWake, forKelivo);
   assert.equal(messages.length, 2);
+});
+
+test("Wake 与 Kelivo 使用独立 cursor，旧全局 cursor 不会吞掉首次同步", () => {
+  reset();
+  const legacy = { schema_version: 1, state_signature: "OLD", last_synced_at: "2026-09-14T08:59:00+08:00" };
+  update(paths.legacyCursor, legacy);
+
+  const wakeFirst = prepareWorkSyncContext(at("09:00"), { channel: "wake" });
+  assert.match(wakeFirst.context, /^【工作同步】/);
+  assert.equal(wakeFirst.cursor.channel, "wake");
+  markWorkSyncDelivered(wakeFirst.cursor, at("09:00"), "wake");
+  assert.ok(fs.existsSync(paths.wakeCursor));
+  assert.equal(fs.existsSync(paths.kelivoCursor), false);
+  assert.deepEqual(JSON.parse(fs.readFileSync(paths.legacyCursor, "utf8")), legacy);
+  assert.equal(prepareWorkSyncContext(at("09:05"), { channel: "wake" }).context, "");
+
+  const kelivoFirst = prepareWorkSyncContext(at("09:05"), { channel: "kelivo" });
+  assert.match(kelivoFirst.context, /^【工作同步】/);
+  assert.equal(kelivoFirst.cursor.channel, "kelivo");
+  markWorkSyncDelivered(kelivoFirst.cursor, at("09:05"), "kelivo");
+  assert.ok(fs.existsSync(paths.kelivoCursor));
+  assert.equal(JSON.parse(fs.readFileSync(paths.wakeCursor, "utf8")).channel, "wake");
+  assert.equal(JSON.parse(fs.readFileSync(paths.kelivoCursor, "utf8")).channel, "kelivo");
+});
+
+test("Work Sync 事实边界仅随实际注入的纸条出现", () => {
+  reset();
+  const first = prepareWorkSyncContext(at("09:00"), { channel: "kelivo" });
+  assert.match(first.context, /事实边界：[\s\S]*未提供的具体同事、设备、故障、步骤、结果或评价/);
+  markWorkSyncDelivered(first.cursor, at("09:00"), "kelivo");
+  const unchanged = prepareWorkSyncContext(at("09:05"), { channel: "kelivo" });
+  assert.equal(unchanged.context, "");
+  assert.equal(unchanged.cursor, null);
+});
+
+test("构建同步不会推进任一 cursor，只有成功路径显式标记时才写入", () => {
+  reset();
+  const wake = prepareWorkSyncContext(at("09:00"), { channel: "wake" });
+  const kelivo = prepareWorkSyncContext(at("09:00"), { channel: "kelivo" });
+  assert.equal(fs.existsSync(paths.wakeCursor), false);
+  assert.equal(fs.existsSync(paths.kelivoCursor), false);
+  markWorkSyncDelivered(kelivo.cursor, at("09:00"), "kelivo");
+  assert.equal(fs.existsSync(paths.wakeCursor), false);
+  assert.ok(fs.existsSync(paths.kelivoCursor));
+  assert.match(wake.context, /^【工作同步】/);
 });
