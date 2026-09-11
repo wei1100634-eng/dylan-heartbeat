@@ -2,14 +2,15 @@ const fs = require("fs");
 const path = require("path");
 const { runtimeDirectory, writeJsonAtomicSync } = require("../runtime_paths");
 const { getDatePartsInTimeZone, resolveTimeZone } = require("../time_utils");
-const { COMPANY, EQUIPMENT } = require("./world");
+const { COMPANY, EQUIPMENT, FACILITIES: WORLD_FACILITIES } = require("./world");
 const { advanceSession, applyScheduleOverride } = require("./onboarding_session");
 const { loadTasks, saveTasks } = require("./tasks");
 const { loadWorkHours, saveWorkHours } = require("./work_hours");
 const { loadLeaves, isOnApprovedLeave } = require("./leaves");
-const { loadKnowledge, saveKnowledge, learnFact, learnOnboardingFact, learnLocationFact, learnCoreFacilityFact } = require("./knowledge");
+const { loadKnowledge, saveKnowledge, learnFact, learnOnboardingFact, learnLocationFact, learnCoreFacilityFact, learnMealBenefitFact } = require("./knowledge");
 const { loadWakeRequests, saveWakeRequests, queueWorkWake, queueOnboardingWake } = require("./wake_requests");
 const { ticksDailyLife } = require("./daily_life");
+const { loadRoutineWork, saveRoutineWork, addRoutineRecord } = require("./routine_work");
 
 const TIME_ZONE = resolveTimeZone();
 const WORK_DIR = runtimeDirectory("shane_work", "shane_work");
@@ -137,6 +138,67 @@ function chooseOnDutyActivity(state, onboardingDay, now = new Date()) {
   return { ...plan, duration_minutes: durationMinutes, with: plan.with || [], equipment_id: target.id, location: plan.location || target.zone };
 }
 
+const ROUTINE_ACTIVITY_KINDS = {
+  inspection: "ROUTINE_INSPECTION",
+  organizing_tools: "ROUTINE_TOOLS_AND_PARTS",
+  reading_manual: "ROUTINE_EQUIPMENT_LEARNING"
+};
+
+function createRoutineActivity(activityState, currentTime) {
+  const kind = ROUTINE_ACTIVITY_KINDS[activityState.activity];
+  if (!kind || !activityState.activity_ends_at) return null;
+  const equipmentId = activityState.activity === "organizing_tools" ? null : activityState.current_equipment_id || null;
+  return {
+    id: `ROUTINE-${currentTime.replace(/[-:T+.]/g, "")}-${activityState.activity.toUpperCase()}`,
+    kind,
+    activity_type: activityState.activity,
+    equipment_id: equipmentId,
+    with: [...(activityState.with || [])],
+    started_at: currentTime,
+    activity_ends_at: activityState.activity_ends_at,
+    result: "NORMAL"
+  };
+}
+
+function routineWorkSegment(date) {
+  const { parts } = getCalendarInfo(date);
+  const minutes = Number(parts.hour) * 60 + Number(parts.minute);
+  const dateKey = `${parts.year}-${parts.month}-${parts.day}`;
+  if (minutes >= 510 && minutes < 720) return `${dateKey}:MORNING`;
+  if (minutes >= 870 && minutes < 1050) return `${dateKey}:AFTERNOON`;
+  return null;
+}
+
+function isRoutineWindowInsideSingleWorkSegment(routine, now) {
+  const startedAt = new Date(routine.started_at);
+  const endsAt = new Date(routine.activity_ends_at);
+  if (!Number.isFinite(startedAt.getTime()) || !Number.isFinite(endsAt.getTime()) || endsAt < startedAt) return false;
+  const startSegment = routineWorkSegment(startedAt);
+  const endSegment = routineWorkSegment(endsAt);
+  return startSegment && startSegment === endSegment && getDateKey(now) === getDateKey(startedAt);
+}
+
+function completeRoutineActivity(routine, now, schedule, immediateEvent, activeTask, store) {
+  if (!routine) return { routine: null, changed: false };
+  const ended = routine.activity_ends_at && new Date(routine.activity_ends_at) <= now;
+  if (!ended) {
+    if (schedule.workState !== "ON_DUTY" || immediateEvent || activeTask) return { routine: null, changed: false };
+    return { routine, changed: false };
+  }
+  if (schedule.workState !== "ON_DUTY" || immediateEvent || activeTask || !isRoutineWindowInsideSingleWorkSegment(routine, now)) return { routine: null, changed: false };
+  const record = {
+    id: routine.id,
+    kind: routine.kind,
+    activity_type: routine.activity_type,
+    equipment_id: routine.equipment_id,
+    with: routine.with,
+    started_at: routine.started_at,
+    completed_at: routine.activity_ends_at,
+    result: routine.result
+  };
+  return { routine: null, changed: addRoutineRecord(store, record) };
+}
+
 function addKnownPeople(state, ids) {
   for (const id of ids) if (!state.known_npc_ids.includes(id)) state.known_npc_ids.push(id);
 }
@@ -158,6 +220,7 @@ const ONBOARDING_LOCATION_BY_STEP = {
 };
 
 const FACILITIES = {
+  CAFETERIA: WORLD_FACILITIES.CAFETERIA,
   BREAK_ROOM: {
     id: "BREAK_ROOM",
     name: "维修部员工休息区",
@@ -617,10 +680,12 @@ function tickBase(now = new Date()) {
     with: previous?.with,
     current_equipment_id: previous?.current_equipment_id,
     activity_ends_at: previous?.activity_ends_at,
-    work_rhythm: previous?.work_rhythm
+    work_rhythm: previous?.work_rhythm,
+    routine_activity: previous?.routine_activity || null
   };
   ensureCoreFacilityLocations(state, onboarding.session);
   const events = loadEvents();
+  const routineStore = loadRoutineWork();
   let tasks = loadTasks();
   const logs = [];
   let activeEvent = getActiveEvent(events);
@@ -661,10 +726,17 @@ function tickBase(now = new Date()) {
   }
   const taskResult = applyTask(state, tasks, now, schedule, onboardingDay, immediateEvent, logs);
   tasks = taskResult.tasks;
+  const routineResult = completeRoutineActivity(state.routine_activity, now, schedule, immediateEvent, taskResult.activeTask, routineStore);
+  if (routineResult.changed) saveRoutineWork(routineStore);
   const discoveredBreakRoom = discoverBreakRoom(state, schedule, onboardingDay);
   let activityState = applyActivity(state, now, schedule, onboardingDay, immediateEvent, taskResult.activeTask);
   if (discoveredBreakRoom) activityState = { activity: "chatting", location: "BREAK_ROOM", with: ["george_nelson"], current_equipment_id: null, activity_ends_at: null, work_rhythm: "quiet" };
   if (!immediateEvent && !taskResult.activeTask && onboarding.activity) activityState = onboarding.activity;
+  let routineActivity = routineResult.routine;
+  const continuingLegacyRoutine = !routineActivity && previous?.work_state === "ON_DUTY" && previous.activity === activityState.activity && previous.activity_ends_at === activityState.activity_ends_at && previous.activity_ends_at && new Date(previous.activity_ends_at) > now;
+  if (!routineActivity && !continuingLegacyRoutine && schedule.workState === "ON_DUTY" && !immediateEvent && !taskResult.activeTask && !onboarding.activity) {
+    routineActivity = createRoutineActivity(activityState, currentTime);
+  }
   const displayState = { is_workday: schedule.isWorkday, work_state: schedule.workState, ...activityState };
   const next = {
     schema_version: 6,
@@ -688,6 +760,7 @@ function tickBase(now = new Date()) {
     current_equipment_id: activityState.current_equipment_id,
     activity_ends_at: activityState.activity_ends_at,
     work_rhythm: activityState.work_rhythm,
+    routine_activity: routineActivity,
     since: hasDisplayStateChanged(previous, displayState) ? currentTime : previous.since,
     last_tick_at: currentTime,
     activity_index: state.activity_index,
@@ -761,13 +834,20 @@ function tick(now = new Date()) {
   }
 next.current_time = currentTime; next.last_tick_at = currentTime; next.equipment = state.equipment;
   const knowledge = loadKnowledge();
-  const locationKnowledgeChanged = base.known_location_ids.includes(FACILITIES.BREAK_ROOM.id)
+  const onboardingCompletedAt = base.onboarding_session?.history?.find(item => item.step_id === "ONBOARDING_COMPLETED")?.occurred_at || currentTime;
+  const breakRoomKnowledgeChanged = base.known_location_ids.includes(FACILITIES.BREAK_ROOM.id)
     ? learnLocationFact(knowledge, FACILITIES.BREAK_ROOM.id, currentTime)
+    : false;
+  const cafeteriaKnowledgeChanged = base.onboarding_session?.status === "COMPLETED" && base.known_location_ids.includes(FACILITIES.CAFETERIA.id)
+    ? learnLocationFact(knowledge, FACILITIES.CAFETERIA.id, currentTime, onboardingCompletedAt)
     : false;
   const coreFacilityKnowledgeChanged = base.onboarding_session?.status === "COMPLETED"
     ? learnCoreFacilityFact(knowledge, base.onboarding_session, currentTime)
     : false;
-  let knowledgeChanged = syncCurrentKnowledge(knowledge, events, loadTasks(), base, session, currentTime) || locationKnowledgeChanged || coreFacilityKnowledgeChanged;
+  const mealBenefitKnowledgeChanged = base.onboarding_session?.status === "COMPLETED"
+    ? learnMealBenefitFact(knowledge, base.onboarding_session, currentTime)
+    : false;
+  let knowledgeChanged = syncCurrentKnowledge(knowledge, events, loadTasks(), base, session, currentTime) || breakRoomKnowledgeChanged || cafeteriaKnowledgeChanged || coreFacilityKnowledgeChanged || mealBenefitKnowledgeChanged;
   let onboardingFact = null;
   if (base.onboarding_session?.history?.length) { onboardingFact = learnOnboardingFact(knowledge, base.onboarding_session, currentTime); knowledgeChanged = true; }
   if (knowledgeChanged) saveKnowledge(knowledge);

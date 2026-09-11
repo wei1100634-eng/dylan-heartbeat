@@ -12,6 +12,7 @@ const WORK_DIR = runtimeDirectory("shane_work", "shane_work");
 const STATE_PATH = path.join(WORK_DIR, "state.json");
 const { tick } = require("../shane_work/shane_work");
 const { loadKnowledge } = require("../shane_work/knowledge");
+const { buildBaselineAwarenessContext } = require("../shane_work/context_builder");
 
 function seedCompletedDay2() {
   fs.mkdirSync(WORK_DIR, { recursive: true });
@@ -118,4 +119,50 @@ test("已完成 onboarding 的旧状态补齐基础厂区认知，但不自动�
 
   tick(new Date("2026-09-10T10:30:00+08:00"));
   assert.equal(loadKnowledge().facts.filter(fact => fact.fact_key === "ONBOARDING:CORE_FACILITY_AWARENESS").length, 1);
+});
+
+test("已完成 onboarding 的旧状态只补建一次员工餐厅与工作餐福利认知", () => {
+  seedCompletedDay2();
+  tick(new Date("2026-09-10T10:00:00+08:00"));
+  const facts = loadKnowledge().facts;
+  const cafeteria = facts.filter(fact => fact.fact_key === "LOCATION_DISCOVERED:CAFETERIA");
+  const benefit = facts.filter(fact => fact.fact_key === "ONBOARDING:MEAL_BENEFIT_AWARENESS");
+  assert.equal(cafeteria.length, 1);
+  assert.deepEqual(cafeteria[0].known_snapshot, { location_id: "CAFETERIA", label: "员工餐厅" });
+  assert.equal(cafeteria[0].learned_at, "2026-09-09T17:00:00+08:00");
+  assert.equal(benefit.length, 1);
+  assert.deepEqual(benefit[0].known_snapshot, {
+    workdays_only: true,
+    breakfast: "07:45-09:00",
+    lunch: "11:30-14:00",
+    included: ["基础餐食", "汤", "水", "咖啡", "茶"],
+    free: true
+  });
+  tick(new Date("2026-09-10T10:30:00+08:00"));
+  const repeated = loadKnowledge().facts;
+  assert.equal(repeated.filter(fact => fact.fact_key === "LOCATION_DISCOVERED:CAFETERIA").length, 1);
+  assert.equal(repeated.filter(fact => fact.fact_key === "ONBOARDING:MEAL_BENEFIT_AWARENESS").length, 1);
+});
+
+test("基础认知只输出已知设施与福利，不包含菜单、品质或个人设施", () => {
+  const state = {
+    company: "星果食品有限公司",
+    role: "设备维修技师",
+    onboarding_phase: "NORMAL"
+  };
+  const incomplete = buildBaselineAwarenessContext({ state, knowledge: { facts: [] } });
+  assert.match(incomplete, /星果食品有限公司设备维修技师/);
+  assert.doesNotMatch(incomplete, /员工餐厅|免费早餐|休息室/);
+
+  const complete = buildBaselineAwarenessContext({ state, knowledge: { facts: [
+    { fact_key: "ONBOARDING:CORE_FACILITY_AWARENESS" },
+    { fact_key: "ONBOARDING:MEAL_BENEFIT_AWARENESS" },
+    { fact_key: "LOCATION_DISCOVERED:CAFETERIA" },
+    { fact_key: "LOCATION_DISCOVERED:BREAK_ROOM" }
+  ] } });
+  assert.match(complete, /正常班次08:30–12:00、14:30–17:30，12:00–14:30午休/);
+  assert.match(complete, /免费早餐07:45-09:00、午餐11:30-14:00/);
+  assert.match(complete, /已知：员工餐厅/);
+  assert.match(complete, /已熟悉：厂内休息室/);
+  assert.doesNotMatch(complete, /菜单|好吃|难吃|SHANE_BED_04|SHANE_LOCKER_04|厕所/);
 });

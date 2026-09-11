@@ -5,7 +5,7 @@ const { buildNtfyPayload } = require("./ntfy_priority");
 const { ensureDataDir, runtimeDirectory, runtimeFile } = require("./runtime_paths");
 const { tick: tickShaneWork, getCurrentOnboardingContext } = require("./shane_work/shane_work");
 const { loadKnowledge } = require("./shane_work/knowledge");
-const { prepareWorkSyncContext, markWorkSyncDelivered } = require("./shane_work/context_builder");
+const { prepareWorkSyncContext, markWorkSyncDelivered, loadBaselineAwarenessContext, buildObjectiveFactBoundaryContext } = require("./shane_work/context_builder");
 const {
   loadWakeRequests,
   saveWakeRequests,
@@ -495,8 +495,10 @@ async function runWakeUp({ workRequest = null } = {}) {
    const workContext = workRequest ? buildWorkContext(workRequest) : "";
    const workSync = prepareWorkSyncContext(now, { force: Boolean(workRequest), channel: "wake" });
    const currentWorkContext = workSync.context;
+   const baselineAwareness = loadBaselineAwarenessContext();
+   const baselineFactBoundary = baselineAwareness && !currentWorkContext ? buildObjectiveFactBoundaryContext() : "";
    const onboardingContext = buildOnboardingContext();
-   const wakeContext = [currentWorkContext, workContext, onboardingContext].filter(Boolean).join("\n\n");
+   const wakeContext = [baselineAwareness, baselineFactBoundary, currentWorkContext, workContext, onboardingContext].filter(Boolean).join("\n\n");
   const wakePrompt = buildWakePrompt(getChinaTimeString(), diffMinutes, weatherContext, wakeContext);
   const cleanMessages = stripPosition(messages);
 
@@ -547,8 +549,8 @@ ${historyText}`
    console.log(JSON.stringify({
      event: "work_sync",
      source: "wake",
-     injected: Boolean(currentWorkContext),
-     work_sync_chars: currentWorkContext.length,
+     injected: Boolean(baselineAwareness || currentWorkContext),
+     work_sync_chars: [baselineAwareness, baselineFactBoundary, currentWorkContext].filter(Boolean).join("\n\n").length,
      messages_before_work_sync: cleanMessages.length,
      messages_sent_upstream: wakeMessages.length
    }));
