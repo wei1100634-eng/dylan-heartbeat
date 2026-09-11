@@ -305,6 +305,7 @@ function buildBaselineAwarenessContext({ state = null, knowledge = null } = {}) 
   }
   if (knownFact(knowledge, "LOCATION_DISCOVERED:CAFETERIA")) lines.push("已知：员工餐厅。");
   if (knownFact(knowledge, "LOCATION_DISCOVERED:BREAK_ROOM")) lines.push("已熟悉：厂内休息室。");
+  if (knownFact(knowledge, "PERSONAL_FACILITY_AWARENESS:BREAK_ROOM")) lines.push("个人设施：4号休息床、4号储物柜。");
   return lines.join("\n");
 }
 
