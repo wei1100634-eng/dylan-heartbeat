@@ -6,7 +6,17 @@ const COMPANY = {
     workdays_only: true,
     breakfast: "07:45-09:00",
     lunch: "11:30-14:00",
-    included: ["基础正餐", "汤", "水", "咖啡", "茶"]
+    included: ["基础餐食", "汤", "水", "咖啡", "茶"],
+    free: true
+  }
+};
+
+// 稳定世界事实；地点本身存在不等于 Shane 已经知道或会被注入上下文。
+const FACILITIES = {
+  CAFETERIA: {
+    id: "CAFETERIA",
+    label: "员工餐厅",
+    purpose: "员工早餐、午餐使用的用餐区域"
   }
 };
 
@@ -29,4 +39,4 @@ const WORLD_RELATIONSHIPS = [
   { people: ["george_nelson", "noah_holmes"], type: "partners" }
 ];
 
-module.exports = { COMPANY, EQUIPMENT, NPCS, WORLD_RELATIONSHIPS };
+module.exports = { COMPANY, FACILITIES, EQUIPMENT, NPCS, WORLD_RELATIONSHIPS };

@@ -7,10 +7,12 @@ const { loadDailyLife, isDailyLifeEventVisible } = require("./daily_life");
 const { loadLeaves, isOnApprovedLeave } = require("./leaves");
 const { loadKnowledge } = require("./knowledge");
 const { loadRoutineWork } = require("./routine_work");
+const { COMPANY } = require("./world");
 
 const TIME_ZONE = resolveTimeZone();
 const WORK_DIR = runtimeDirectory("shane_work", "shane_work");
 const STATE_PATH = path.join(WORK_DIR, "state.json");
+const OBJECTIVE_FACT_BOUNDARY = "客观事实以提供内容为准；未提供的餐食、品质或工作经历不视为已发生。";
 const SYNC_CURSOR_PATHS = {
   kelivo: path.join(WORK_DIR, "work_sync_cursor_kelivo.json"),
   wake: path.join(WORK_DIR, "work_sync_cursor_wake.json")
@@ -289,6 +291,38 @@ function formatWorkTime(value) {
   return match ? match[1] : "";
 }
 
+function knownFact(knowledge, factKey) {
+  return (knowledge?.facts || []).find(fact => fact.fact_key === factKey) || null;
+}
+
+function buildBaselineAwarenessContext({ state = null, knowledge = null } = {}) {
+  if (!state?.company || !state?.role) return "";
+  const lines = ["【工作基础】", `${state.company}${state.role}。`, "正常班次08:30–12:00、14:30–17:30，12:00–14:30午休。"];
+  if (knownFact(knowledge, "ONBOARDING:CORE_FACILITY_AWARENESS")) lines.push("已熟悉：生产区域、维修间、仓库、安全出口及主要设备区域。");
+  if (knownFact(knowledge, "ONBOARDING:MEAL_BENEFIT_AWARENESS")) {
+    const meal = COMPANY.meal_service;
+    lines.push(`工作日免费早餐${meal.breakfast}、午餐${meal.lunch}；基础餐食、汤、水、咖啡、茶免费。`);
+  }
+  if (knownFact(knowledge, "LOCATION_DISCOVERED:CAFETERIA")) lines.push("已知：员工餐厅。");
+  if (knownFact(knowledge, "LOCATION_DISCOVERED:BREAK_ROOM")) lines.push("已熟悉：厂内休息室。");
+  return lines.join("\n");
+}
+
+function loadBaselineAwarenessContext() {
+  try {
+    if (!fs.existsSync(STATE_PATH)) return "";
+    const state = JSON.parse(fs.readFileSync(STATE_PATH, "utf8"));
+    return buildBaselineAwarenessContext({ state, knowledge: loadKnowledge() });
+  } catch (error) {
+    console.error("构建 Shane Work 基础认知失败:", error.message);
+    return "";
+  }
+}
+
+function buildObjectiveFactBoundaryContext() {
+  return `【事实边界】\n${OBJECTIVE_FACT_BOUNDARY}`;
+}
+
 const NPC_LABELS = {
   george_nelson: "George",
   miguel_santos: "Miguel",
@@ -446,7 +480,7 @@ function loadCurrentWorkContext(now = new Date()) {
 }
 
 function insertTransientCurrentWorkContext(messages, context) {
-  const clean = (messages || []).filter(message => !(message?.role === "system" && /^(## 当前工作上下文|【工作同步】)/.test(String(message.content || ""))));
+  const clean = (messages || []).filter(message => !(message?.role === "system" && /^(## 当前工作上下文|【工作同步】|【工作基础】)/.test(String(message.content || ""))));
   if (!context) return [...clean];
   const index = clean.map(message => message.role).lastIndexOf("user");
   const target = index >= 0 ? index : clean.length;
@@ -457,6 +491,8 @@ function insertTransientCurrentWorkContext(messages, context) {
 
 module.exports = {
   buildContext,
+  buildBaselineAwarenessContext,
+  buildObjectiveFactBoundaryContext,
   buildCurrentSelfStateContext,
   buildKnownWorkProgressContext,
   buildWorkSyncNote,
@@ -467,6 +503,7 @@ module.exports = {
   getEffectiveCurrentState,
   insertTransientCurrentWorkContext,
   loadCurrentWorkContext,
+  loadBaselineAwarenessContext,
   loadWorkSyncCursor,
   markWorkSyncDelivered,
   prepareWorkSyncContext,

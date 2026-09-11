@@ -12,7 +12,7 @@ const {
 } = require("./runtime_paths");
 const { isSpecialEventContent } = require("./special_events");
 const { decideRequestAccess } = require("./network_access");
-const { prepareWorkSyncContext, markWorkSyncDelivered, insertTransientCurrentWorkContext } = require("./shane_work/context_builder");
+const { prepareWorkSyncContext, markWorkSyncDelivered, insertTransientCurrentWorkContext, loadBaselineAwarenessContext, buildObjectiveFactBoundaryContext } = require("./shane_work/context_builder");
 const {
   formatDateTimeInTimeZone,
   resolveTimeZone,
@@ -695,12 +695,15 @@ app.post("/v1/chat/completions", async (req, reply) => {
 
     // 仅加入本次上游请求，不写回 Kelivo messages、timeline 或持久聊天历史。
     const workSync = prepareWorkSyncContext(new Date(), { channel: "kelivo" });
-    const messagesWithCurrentWork = insertTransientCurrentWorkContext(llmMessages, workSync.context);
+    const baselineAwareness = loadBaselineAwarenessContext();
+    const baselineFactBoundary = baselineAwareness && !workSync.context ? buildObjectiveFactBoundaryContext() : "";
+    const transientWorkContext = [baselineAwareness, baselineFactBoundary, workSync.context].filter(Boolean).join("\n\n");
+    const messagesWithCurrentWork = insertTransientCurrentWorkContext(llmMessages, transientWorkContext);
     console.log(JSON.stringify({
       event: "work_sync",
       source: "kelivo_gateway",
-      injected: Boolean(workSync.context),
-      work_sync_chars: workSync.context.length,
+      injected: Boolean(transientWorkContext),
+      work_sync_chars: transientWorkContext.length,
       messages_before_work_sync: llmMessages.length,
       messages_sent_upstream: messagesWithCurrentWork.length
     }));

@@ -13,7 +13,9 @@ const {
   prepareWorkSyncContext,
   markWorkSyncDelivered,
   insertTransientCurrentWorkContext,
-  buildTodayKnownExperience
+  buildTodayKnownExperience,
+  buildBaselineAwarenessContext,
+  buildObjectiveFactBoundaryContext
 } = require("../shane_work/context_builder");
 
 const WORK_DIR = runtimeDirectory("shane_work", "shane_work");
@@ -265,6 +267,26 @@ test("Work Sync 重建今天已知经历：只保留已知完成事实与已完�
   update(paths.state, state);
   const later = prepareWorkSyncContext(at("10:35"));
   assert.match(later.context, /今天已发生：[\s\S]*整理常用维修工具与备件/);
+});
+
+test("基础认知独立于 Work Sync cursor：无 delta 时仍可作为 transient 上下文插入", () => {
+  reset();
+  const baseline = buildBaselineAwarenessContext({
+    state: { company: "星果食品有限公司", role: "设备维修技师" },
+    knowledge: { facts: [{ fact_key: "ONBOARDING:MEAL_BENEFIT_AWARENESS" }, { fact_key: "LOCATION_DISCOVERED:CAFETERIA" }] }
+  });
+  const initial = prepareWorkSyncContext(at("09:00"));
+  markWorkSyncDelivered(initial.cursor, at("09:00"));
+  const unchanged = prepareWorkSyncContext(at("09:05"));
+  assert.equal(unchanged.context, "");
+  const before = snapshotFiles();
+  const messages = [{ role: "system", content: "人格" }, { role: "user", content: "新窗口第一条消息" }];
+  const injected = insertTransientCurrentWorkContext(messages, [baseline, buildObjectiveFactBoundaryContext()].join("\n\n"));
+  assert.match(injected.at(-2).content, /^【工作基础】[\s\S]*免费早餐07:45-09:00、午餐11:30-14:00[\s\S]*员工餐厅/);
+  assert.match(injected.at(-2).content, /【事实边界】[\s\S]*未提供的餐食、品质或工作经历不视为已发生/);
+  assertFilesUnchanged(before);
+  assert.equal(fs.existsSync(paths.kelivoCursor), true);
+  assert.equal(fs.existsSync(paths.wakeCursor), false);
 });
 
 test("Today Known Experience 至多四条，未来和未知 world 事实不会进入", () => {
