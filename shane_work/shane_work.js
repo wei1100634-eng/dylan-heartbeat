@@ -7,7 +7,7 @@ const { advanceSession, applyScheduleOverride } = require("./onboarding_session"
 const { loadTasks, saveTasks } = require("./tasks");
 const { loadWorkHours, saveWorkHours } = require("./work_hours");
 const { loadLeaves, isOnApprovedLeave } = require("./leaves");
-const { loadKnowledge, saveKnowledge, learnFact, learnOnboardingFact, learnLocationFact, learnCoreFacilityFact, learnMealBenefitFact } = require("./knowledge");
+const { loadKnowledge, saveKnowledge, learnFact, learnOnboardingFact, learnLocationFact, learnCoreFacilityFact, learnMealBenefitFact, learnPersonalFacilityFact } = require("./knowledge");
 const { loadWakeRequests, saveWakeRequests, queueWorkWake, queueOnboardingWake } = require("./wake_requests");
 const { ticksDailyLife } = require("./daily_life");
 const { loadRoutineWork, saveRoutineWork, addRoutineRecord } = require("./routine_work");
@@ -257,6 +257,14 @@ function discoverBreakRoom(state, schedule, onboardingDay) {
   if (schedule.workState !== "LUNCH" || onboardingDay < 3 || state.known_location_ids.includes(FACILITIES.BREAK_ROOM.id)) return false;
   state.known_location_ids.push(FACILITIES.BREAK_ROOM.id);
   state.personal_facilities = { rest_bed_id: "SHANE_BED_04", locker_id: "SHANE_LOCKER_04" };
+  return true;
+}
+
+function ensureBreakRoomPersonalFacilities(state) {
+  if (!state.known_location_ids.includes(FACILITIES.BREAK_ROOM.id)) return false;
+  const expected = { rest_bed_id: "SHANE_BED_04", locker_id: "SHANE_LOCKER_04" };
+  if (state.personal_facilities?.rest_bed_id === expected.rest_bed_id && state.personal_facilities?.locker_id === expected.locker_id) return false;
+  state.personal_facilities = expected;
   return true;
 }
 
@@ -729,6 +737,7 @@ function tickBase(now = new Date()) {
   const routineResult = completeRoutineActivity(state.routine_activity, now, schedule, immediateEvent, taskResult.activeTask, routineStore);
   if (routineResult.changed) saveRoutineWork(routineStore);
   const discoveredBreakRoom = discoverBreakRoom(state, schedule, onboardingDay);
+  ensureBreakRoomPersonalFacilities(state);
   let activityState = applyActivity(state, now, schedule, onboardingDay, immediateEvent, taskResult.activeTask);
   if (discoveredBreakRoom) activityState = { activity: "chatting", location: "BREAK_ROOM", with: ["george_nelson"], current_equipment_id: null, activity_ends_at: null, work_rhythm: "quiet" };
   if (!immediateEvent && !taskResult.activeTask && onboarding.activity) activityState = onboarding.activity;
@@ -838,6 +847,12 @@ next.current_time = currentTime; next.last_tick_at = currentTime; next.equipment
   const breakRoomKnowledgeChanged = base.known_location_ids.includes(FACILITIES.BREAK_ROOM.id)
     ? learnLocationFact(knowledge, FACILITIES.BREAK_ROOM.id, currentTime)
     : false;
+  const breakRoomLearnedAt = knowledge.facts.find(fact => fact.fact_key === "LOCATION_DISCOVERED:BREAK_ROOM")?.learned_at || currentTime;
+  const personalFacilityKnowledgeChanged = base.known_location_ids.includes(FACILITIES.BREAK_ROOM.id)
+    && base.personal_facilities?.rest_bed_id === "SHANE_BED_04"
+    && base.personal_facilities?.locker_id === "SHANE_LOCKER_04"
+    ? learnPersonalFacilityFact(knowledge, base.personal_facilities, currentTime, breakRoomLearnedAt)
+    : false;
   const cafeteriaKnowledgeChanged = base.onboarding_session?.status === "COMPLETED" && base.known_location_ids.includes(FACILITIES.CAFETERIA.id)
     ? learnLocationFact(knowledge, FACILITIES.CAFETERIA.id, currentTime, onboardingCompletedAt)
     : false;
@@ -847,7 +862,7 @@ next.current_time = currentTime; next.last_tick_at = currentTime; next.equipment
   const mealBenefitKnowledgeChanged = base.onboarding_session?.status === "COMPLETED"
     ? learnMealBenefitFact(knowledge, base.onboarding_session, currentTime)
     : false;
-  let knowledgeChanged = syncCurrentKnowledge(knowledge, events, loadTasks(), base, session, currentTime) || breakRoomKnowledgeChanged || cafeteriaKnowledgeChanged || coreFacilityKnowledgeChanged || mealBenefitKnowledgeChanged;
+  let knowledgeChanged = syncCurrentKnowledge(knowledge, events, loadTasks(), base, session, currentTime) || breakRoomKnowledgeChanged || personalFacilityKnowledgeChanged || cafeteriaKnowledgeChanged || coreFacilityKnowledgeChanged || mealBenefitKnowledgeChanged;
   let onboardingFact = null;
   if (base.onboarding_session?.history?.length) { onboardingFact = learnOnboardingFact(knowledge, base.onboarding_session, currentTime); knowledgeChanged = true; }
   if (knowledgeChanged) saveKnowledge(knowledge);

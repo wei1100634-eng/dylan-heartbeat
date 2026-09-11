@@ -86,6 +86,28 @@ test("首次认识 BREAK_ROOM 只建立一条窄地点认知事实", () => {
   assert.equal(loadKnowledge().facts.filter(fact => fact.fact_key === "LOCATION_DISCOVERED:BREAK_ROOM").length, 1);
 });
 
+test("首次认识 BREAK_ROOM 同步建立一次个人设施认知，并只在基础认知中窄暴露", () => {
+  seedCompletedDay2();
+  const state = tick(new Date("2026-09-10T12:30:00+08:00"));
+  const facts = loadKnowledge().facts;
+  const locationFact = facts.find(fact => fact.fact_key === "LOCATION_DISCOVERED:BREAK_ROOM");
+  const facilityFacts = facts.filter(fact => fact.fact_key === "PERSONAL_FACILITY_AWARENESS:BREAK_ROOM");
+  assert.equal(facilityFacts.length, 1);
+  assert.equal(facilityFacts[0].subject_type, "FACILITY");
+  assert.equal(facilityFacts[0].learned_at, locationFact.learned_at);
+  assert.deepEqual(facilityFacts[0].known_snapshot, {
+    rest_bed_id: "SHANE_BED_04",
+    locker_id: "SHANE_LOCKER_04",
+    label: "4号休息床位和4号储物柜"
+  });
+  const baseline = buildBaselineAwarenessContext({ state, knowledge: loadKnowledge() });
+  assert.match(baseline, /个人设施：4号休息床、4号储物柜/);
+  assert.doesNotMatch(baseline, /SHANE_BED_04|SHANE_LOCKER_04|桌椅|饮水机|小冰箱|微波炉|插座/);
+
+  tick(new Date("2026-09-10T12:45:00+08:00"));
+  assert.equal(loadKnowledge().facts.filter(fact => fact.fact_key === "PERSONAL_FACILITY_AWARENESS:BREAK_ROOM").length, 1);
+});
+
 test("已有 BREAK_ROOM 的旧状态只补建一次地点认知事实", () => {
   seedCompletedDay2();
   const prior = JSON.parse(fs.readFileSync(STATE_PATH, "utf8"));
@@ -104,6 +126,52 @@ test("已有 BREAK_ROOM 的旧状态只补建一次地点认知事实", () => {
   const state = JSON.parse(fs.readFileSync(STATE_PATH, "utf8"));
   assert.ok(state.known_location_ids.includes("BREAK_ROOM"));
   assert.deepEqual(state.personal_facilities, prior.personal_facilities);
+});
+
+test("已有 BREAK_ROOM 和个人设施的旧状态只补建个人设施认知，并复用发现时间", () => {
+  seedCompletedDay2();
+  const prior = JSON.parse(fs.readFileSync(STATE_PATH, "utf8"));
+  prior.known_location_ids = ["CAFETERIA", "FACTORY_FLOOR", "MAINTENANCE_ROOM", "OFF_SITE", "BREAK_ROOM"];
+  prior.personal_facilities = { rest_bed_id: "SHANE_BED_04", locker_id: "SHANE_LOCKER_04" };
+  prior.activity = "waiting";
+  prior.location = "MAINTENANCE_ROOM";
+  writeJsonAtomicSync(STATE_PATH, prior);
+  writeJsonAtomicSync(path.join(WORK_DIR, "knowledge.json"), { schema_version: 1, facts: [{
+    knowledge_id: "KN-000001", fact_key: "LOCATION_DISCOVERED:BREAK_ROOM", subject_type: "LOCATION",
+    learned_at: "2026-09-09T12:30:00+08:00", last_known_at: "2026-09-09T12:30:00+08:00",
+    known_snapshot: { location_id: "BREAK_ROOM", label: "厂内休息室" }
+  }] });
+
+  const state = tick(new Date("2026-09-10T10:00:00+08:00"));
+  const facilityFact = loadKnowledge().facts.find(fact => fact.fact_key === "PERSONAL_FACILITY_AWARENESS:BREAK_ROOM");
+  assert.equal(facilityFact.learned_at, "2026-09-09T12:30:00+08:00");
+  assert.equal(state.location, "MAINTENANCE_ROOM");
+  assert.notEqual(state.location, "BREAK_ROOM");
+  assert.doesNotMatch(JSON.stringify(state.with), /george_nelson/);
+  tick(new Date("2026-09-10T10:30:00+08:00"));
+  assert.equal(loadKnowledge().facts.filter(fact => fact.fact_key === "PERSONAL_FACILITY_AWARENESS:BREAK_ROOM").length, 1);
+});
+
+test("已有 BREAK_ROOM 但缺个人设施的旧状态确定性补齐且不重放发现", () => {
+  seedCompletedDay2();
+  const prior = JSON.parse(fs.readFileSync(STATE_PATH, "utf8"));
+  prior.known_location_ids = ["CAFETERIA", "FACTORY_FLOOR", "MAINTENANCE_ROOM", "OFF_SITE", "BREAK_ROOM"];
+  prior.activity = "waiting";
+  prior.location = "MAINTENANCE_ROOM";
+  delete prior.personal_facilities;
+  writeJsonAtomicSync(STATE_PATH, prior);
+  writeJsonAtomicSync(path.join(WORK_DIR, "knowledge.json"), { schema_version: 1, facts: [{
+    knowledge_id: "KN-000001", fact_key: "LOCATION_DISCOVERED:BREAK_ROOM", subject_type: "LOCATION",
+    learned_at: "2026-09-09T12:30:00+08:00", last_known_at: "2026-09-09T12:30:00+08:00",
+    known_snapshot: { location_id: "BREAK_ROOM", label: "厂内休息室" }
+  }] });
+
+  const state = tick(new Date("2026-09-10T10:00:00+08:00"));
+  assert.deepEqual(state.personal_facilities, { rest_bed_id: "SHANE_BED_04", locker_id: "SHANE_LOCKER_04" });
+  assert.equal(state.location, "MAINTENANCE_ROOM");
+  assert.notEqual(state.location, "BREAK_ROOM");
+  const facilityFact = loadKnowledge().facts.find(fact => fact.fact_key === "PERSONAL_FACILITY_AWARENESS:BREAK_ROOM");
+  assert.equal(facilityFact.learned_at, "2026-09-09T12:30:00+08:00");
 });
 test("已完成 onboarding 的旧状态补齐基础厂区认知，但不自动获得 BREAK_ROOM", () => {
   seedCompletedDay2();
@@ -144,7 +212,7 @@ test("已完成 onboarding 的旧状态只补建一次员工餐厅与工作餐�
   assert.equal(repeated.filter(fact => fact.fact_key === "ONBOARDING:MEAL_BENEFIT_AWARENESS").length, 1);
 });
 
-test("基础认知只输出已知设施与福利，不包含菜单、品质或个人设施", () => {
+test("基础认知只输出已知设施、福利和已知个人设施，不包含完整 fixtures", () => {
   const state = {
     company: "星果食品有限公司",
     role: "设备维修技师",
@@ -153,16 +221,19 @@ test("基础认知只输出已知设施与福利，不包含菜单、品质或�
   const incomplete = buildBaselineAwarenessContext({ state, knowledge: { facts: [] } });
   assert.match(incomplete, /星果食品有限公司设备维修技师/);
   assert.doesNotMatch(incomplete, /员工餐厅|免费早餐|休息室/);
+  assert.doesNotMatch(incomplete, /个人设施|4号休息床|4号储物柜/);
 
   const complete = buildBaselineAwarenessContext({ state, knowledge: { facts: [
     { fact_key: "ONBOARDING:CORE_FACILITY_AWARENESS" },
     { fact_key: "ONBOARDING:MEAL_BENEFIT_AWARENESS" },
     { fact_key: "LOCATION_DISCOVERED:CAFETERIA" },
-    { fact_key: "LOCATION_DISCOVERED:BREAK_ROOM" }
+    { fact_key: "LOCATION_DISCOVERED:BREAK_ROOM" },
+    { fact_key: "PERSONAL_FACILITY_AWARENESS:BREAK_ROOM" }
   ] } });
   assert.match(complete, /正常班次08:30–12:00、14:30–17:30，12:00–14:30午休/);
   assert.match(complete, /免费早餐07:45-09:00、午餐11:30-14:00/);
   assert.match(complete, /已知：员工餐厅/);
   assert.match(complete, /已熟悉：厂内休息室/);
-  assert.doesNotMatch(complete, /菜单|好吃|难吃|SHANE_BED_04|SHANE_LOCKER_04|厕所/);
+  assert.match(complete, /个人设施：4号休息床、4号储物柜/);
+  assert.doesNotMatch(complete, /菜单|好吃|难吃|SHANE_BED_04|SHANE_LOCKER_04|厕所|桌椅|饮水机|小冰箱|微波炉|插座/);
 });
