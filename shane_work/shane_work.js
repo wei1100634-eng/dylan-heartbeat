@@ -10,6 +10,7 @@ const { loadLeaves, isOnApprovedLeave } = require("./leaves");
 const { loadKnowledge, saveKnowledge, learnFact, learnOnboardingFact, learnLocationFact, learnCoreFacilityFact } = require("./knowledge");
 const { loadWakeRequests, saveWakeRequests, queueWorkWake, queueOnboardingWake } = require("./wake_requests");
 const { ticksDailyLife } = require("./daily_life");
+const { loadRoutineWork, saveRoutineWork, addRoutineRecord } = require("./routine_work");
 
 const TIME_ZONE = resolveTimeZone();
 const WORK_DIR = runtimeDirectory("shane_work", "shane_work");
@@ -135,6 +136,67 @@ function chooseOnDutyActivity(state, onboardingDay, now = new Date()) {
   ][index % 8];
   const durationMinutes = 30 + (hashText(`${getDateKey(now)}|activity|${index}|${plan.activity}`) % 91);
   return { ...plan, duration_minutes: durationMinutes, with: plan.with || [], equipment_id: target.id, location: plan.location || target.zone };
+}
+
+const ROUTINE_ACTIVITY_KINDS = {
+  inspection: "ROUTINE_INSPECTION",
+  organizing_tools: "ROUTINE_TOOLS_AND_PARTS",
+  reading_manual: "ROUTINE_EQUIPMENT_LEARNING"
+};
+
+function createRoutineActivity(activityState, currentTime) {
+  const kind = ROUTINE_ACTIVITY_KINDS[activityState.activity];
+  if (!kind || !activityState.activity_ends_at) return null;
+  const equipmentId = activityState.activity === "organizing_tools" ? null : activityState.current_equipment_id || null;
+  return {
+    id: `ROUTINE-${currentTime.replace(/[-:T+.]/g, "")}-${activityState.activity.toUpperCase()}`,
+    kind,
+    activity_type: activityState.activity,
+    equipment_id: equipmentId,
+    with: [...(activityState.with || [])],
+    started_at: currentTime,
+    activity_ends_at: activityState.activity_ends_at,
+    result: "NORMAL"
+  };
+}
+
+function routineWorkSegment(date) {
+  const { parts } = getCalendarInfo(date);
+  const minutes = Number(parts.hour) * 60 + Number(parts.minute);
+  const dateKey = `${parts.year}-${parts.month}-${parts.day}`;
+  if (minutes >= 510 && minutes < 720) return `${dateKey}:MORNING`;
+  if (minutes >= 870 && minutes < 1050) return `${dateKey}:AFTERNOON`;
+  return null;
+}
+
+function isRoutineWindowInsideSingleWorkSegment(routine, now) {
+  const startedAt = new Date(routine.started_at);
+  const endsAt = new Date(routine.activity_ends_at);
+  if (!Number.isFinite(startedAt.getTime()) || !Number.isFinite(endsAt.getTime()) || endsAt < startedAt) return false;
+  const startSegment = routineWorkSegment(startedAt);
+  const endSegment = routineWorkSegment(endsAt);
+  return startSegment && startSegment === endSegment && getDateKey(now) === getDateKey(startedAt);
+}
+
+function completeRoutineActivity(routine, now, schedule, immediateEvent, activeTask, store) {
+  if (!routine) return { routine: null, changed: false };
+  const ended = routine.activity_ends_at && new Date(routine.activity_ends_at) <= now;
+  if (!ended) {
+    if (schedule.workState !== "ON_DUTY" || immediateEvent || activeTask) return { routine: null, changed: false };
+    return { routine, changed: false };
+  }
+  if (schedule.workState !== "ON_DUTY" || immediateEvent || activeTask || !isRoutineWindowInsideSingleWorkSegment(routine, now)) return { routine: null, changed: false };
+  const record = {
+    id: routine.id,
+    kind: routine.kind,
+    activity_type: routine.activity_type,
+    equipment_id: routine.equipment_id,
+    with: routine.with,
+    started_at: routine.started_at,
+    completed_at: routine.activity_ends_at,
+    result: routine.result
+  };
+  return { routine: null, changed: addRoutineRecord(store, record) };
 }
 
 function addKnownPeople(state, ids) {
@@ -617,10 +679,12 @@ function tickBase(now = new Date()) {
     with: previous?.with,
     current_equipment_id: previous?.current_equipment_id,
     activity_ends_at: previous?.activity_ends_at,
-    work_rhythm: previous?.work_rhythm
+    work_rhythm: previous?.work_rhythm,
+    routine_activity: previous?.routine_activity || null
   };
   ensureCoreFacilityLocations(state, onboarding.session);
   const events = loadEvents();
+  const routineStore = loadRoutineWork();
   let tasks = loadTasks();
   const logs = [];
   let activeEvent = getActiveEvent(events);
@@ -661,10 +725,17 @@ function tickBase(now = new Date()) {
   }
   const taskResult = applyTask(state, tasks, now, schedule, onboardingDay, immediateEvent, logs);
   tasks = taskResult.tasks;
+  const routineResult = completeRoutineActivity(state.routine_activity, now, schedule, immediateEvent, taskResult.activeTask, routineStore);
+  if (routineResult.changed) saveRoutineWork(routineStore);
   const discoveredBreakRoom = discoverBreakRoom(state, schedule, onboardingDay);
   let activityState = applyActivity(state, now, schedule, onboardingDay, immediateEvent, taskResult.activeTask);
   if (discoveredBreakRoom) activityState = { activity: "chatting", location: "BREAK_ROOM", with: ["george_nelson"], current_equipment_id: null, activity_ends_at: null, work_rhythm: "quiet" };
   if (!immediateEvent && !taskResult.activeTask && onboarding.activity) activityState = onboarding.activity;
+  let routineActivity = routineResult.routine;
+  const continuingLegacyRoutine = !routineActivity && previous?.work_state === "ON_DUTY" && previous.activity === activityState.activity && previous.activity_ends_at === activityState.activity_ends_at && previous.activity_ends_at && new Date(previous.activity_ends_at) > now;
+  if (!routineActivity && !continuingLegacyRoutine && schedule.workState === "ON_DUTY" && !immediateEvent && !taskResult.activeTask && !onboarding.activity) {
+    routineActivity = createRoutineActivity(activityState, currentTime);
+  }
   const displayState = { is_workday: schedule.isWorkday, work_state: schedule.workState, ...activityState };
   const next = {
     schema_version: 6,
@@ -688,6 +759,7 @@ function tickBase(now = new Date()) {
     current_equipment_id: activityState.current_equipment_id,
     activity_ends_at: activityState.activity_ends_at,
     work_rhythm: activityState.work_rhythm,
+    routine_activity: routineActivity,
     since: hasDisplayStateChanged(previous, displayState) ? currentTime : previous.since,
     last_tick_at: currentTime,
     activity_index: state.activity_index,

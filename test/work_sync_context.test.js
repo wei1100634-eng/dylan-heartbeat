@@ -12,7 +12,8 @@ const { runtimeDirectory, writeJsonAtomicSync } = require("../runtime_paths");
 const {
   prepareWorkSyncContext,
   markWorkSyncDelivered,
-  insertTransientCurrentWorkContext
+  insertTransientCurrentWorkContext,
+  buildTodayKnownExperience
 } = require("../shane_work/context_builder");
 
 const WORK_DIR = runtimeDirectory("shane_work", "shane_work");
@@ -26,7 +27,8 @@ const paths = {
   hours: path.join(WORK_DIR, "work_hours.json"),
   legacyCursor: path.join(WORK_DIR, "work_sync_cursor.json"),
   kelivoCursor: path.join(WORK_DIR, "work_sync_cursor_kelivo.json"),
-  wakeCursor: path.join(WORK_DIR, "work_sync_cursor_wake.json")
+  wakeCursor: path.join(WORK_DIR, "work_sync_cursor_wake.json"),
+  routine: path.join(WORK_DIR, "routine_work.json")
 };
 
 function at(time) { return new Date(`2026-09-14T${time}:00+08:00`); }
@@ -43,6 +45,7 @@ function reset() {
   writeJsonAtomicSync(paths.tasks, [{ task_id: "WORLD-UNKNOWN-TASK" }]);
   writeJsonAtomicSync(paths.wake, { schema_version: 1, requests: [] });
   writeJsonAtomicSync(paths.hours, [{ record_id: "KEEP-HOURS" }]);
+  writeJsonAtomicSync(paths.routine, { schema_version: 1, records: [] });
 }
 function update(file, value) { writeJsonAtomicSync(file, value); }
 function snapshotFiles() { return new Map(Object.values(paths).filter(file => fs.existsSync(file)).map(file => [file, fs.readFileSync(file, "utf8")])); }
@@ -232,4 +235,49 @@ test("基础厂区认知由 Wake 和 Kelivo 独立同步，且只输出窄摘要
   assert.match(prepareWorkSyncContext(at("10:06"), { channel: "kelivo" }).context, /已熟悉：生产区域、维修间、仓库、安全出口及主要设备区域的基本划分/);
   markWorkSyncDelivered(kelivo.cursor, at("10:06"), "kelivo");
   assert.equal(prepareWorkSyncContext(at("10:07"), { channel: "kelivo" }).context, "");
+});
+
+test("Work Sync 重建今天已知经历：只保留已知完成事实与已完成 routine work，且不重复近期", () => {
+  reset();
+  const initial = prepareWorkSyncContext(at("09:00"));
+  markWorkSyncDelivered(initial.cursor, at("09:00"));
+  update(paths.knowledge, { schema_version: 1, facts: [
+    { fact_key: "TASK:TASK-1", subject_type: "TASK", last_known_at: "2026-09-14T09:20:00+08:00", known_snapshot: { equipment_id: "A02", category: "PLANNED_INSPECTION", status: "DONE", completed_at: "2026-09-14T09:20:00+08:00" } },
+    { fact_key: "EVENT:EVT-RESOLVED", subject_type: "EVENT", last_known_at: "2026-09-14T09:25:00+08:00", known_snapshot: { equipment_id: "B02", category: "SENSOR_CHECK", status: "RESOLVED", resolved_at: "2026-09-14T09:25:00+08:00" } },
+    { fact_key: "EVENT:EVT-ACTIVE", subject_type: "EVENT", last_known_at: "2026-09-14T09:26:00+08:00", known_snapshot: { equipment_id: "C02", category: "SENSOR_CHECK", status: "REPAIRING" } }
+  ] });
+  update(paths.routine, { schema_version: 1, records: [
+    { id: "ROUTINE-1", activity_type: "organizing_tools", equipment_id: null, with: [], started_at: "2026-09-14T09:25:00+08:00", completed_at: "2026-09-14T09:45:00+08:00", result: "NORMAL" },
+    { id: "ROUTINE-2", activity_type: "inspection", equipment_id: "A03", with: ["george_nelson"], started_at: "2026-09-14T09:50:00+08:00", completed_at: "2026-09-14T10:20:00+08:00", result: "NORMAL" },
+    { id: "ROUTINE-FUTURE", activity_type: "reading_manual", equipment_id: "C01", with: [], started_at: "2026-09-14T11:30:00+08:00", completed_at: "2026-09-14T12:00:00+08:00", result: "NORMAL" }
+  ] });
+  const sync = prepareWorkSyncContext(at("10:30"));
+  assert.match(sync.context, /今天已发生：/);
+  assert.match(sync.context, /B02 传感器检查处理完成/);
+  assert.match(sync.context, /整理常用维修工具与备件/);
+  assert.match(sync.context, /完成 A03 例行检查，未发现需要处理的异常。\（与 George\）/);
+  assert.doesNotMatch(sync.context, /C01|ROUTINE-FUTURE|WORLD-UNKNOWN|SECRET_WORLD_EVENT|李师傅|老手|师傅/);
+  assert.equal((sync.context.match(/A02 例行检查完成/g) || []).length, 1);
+
+  markWorkSyncDelivered(sync.cursor, at("10:30"));
+  const state = JSON.parse(fs.readFileSync(paths.state, "utf8"));
+  state.activity = "waiting";
+  update(paths.state, state);
+  const later = prepareWorkSyncContext(at("10:35"));
+  assert.match(later.context, /今天已发生：[\s\S]*整理常用维修工具与备件/);
+});
+
+test("Today Known Experience 至多四条，未来和未知 world 事实不会进入", () => {
+  reset();
+  const experience = buildTodayKnownExperience({ now: at("10:30"), knowledge: { facts: [] }, routineWork: { records: [
+    { id: "R1", activity_type: "inspection", equipment_id: "A01", with: [], started_at: "2026-09-14T08:30:00+08:00", completed_at: "2026-09-14T08:50:00+08:00" },
+    { id: "R2", activity_type: "inspection", equipment_id: "A02", with: [], started_at: "2026-09-14T08:55:00+08:00", completed_at: "2026-09-14T09:10:00+08:00" },
+    { id: "R3", activity_type: "reading_manual", equipment_id: "A03", with: [], started_at: "2026-09-14T09:15:00+08:00", completed_at: "2026-09-14T09:35:00+08:00" },
+    { id: "R4", activity_type: "organizing_tools", equipment_id: null, with: [], started_at: "2026-09-14T09:40:00+08:00", completed_at: "2026-09-14T10:00:00+08:00" },
+    { id: "R5", activity_type: "inspection", equipment_id: "B01", with: [], started_at: "2026-09-14T10:05:00+08:00", completed_at: "2026-09-14T10:20:00+08:00" },
+    { id: "RF", activity_type: "inspection", equipment_id: "C01", with: [], started_at: "2026-09-14T11:00:00+08:00", completed_at: "2026-09-14T11:30:00+08:00" }
+  ] } });
+  assert.equal(experience.length, 4);
+  assert.ok(experience.some(item => item.text.includes("B01")));
+  assert.ok(experience.every(item => !item.text.includes("C01")));
 });

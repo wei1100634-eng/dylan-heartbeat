@@ -6,6 +6,7 @@ const { getScheduleState } = require("./shane_work");
 const { loadDailyLife, isDailyLifeEventVisible } = require("./daily_life");
 const { loadLeaves, isOnApprovedLeave } = require("./leaves");
 const { loadKnowledge } = require("./knowledge");
+const { loadRoutineWork } = require("./routine_work");
 
 const TIME_ZONE = resolveTimeZone();
 const WORK_DIR = runtimeDirectory("shane_work", "shane_work");
@@ -283,6 +284,48 @@ function describeRecentKnownFact(fact) {
   return `开始检查${equipment}${label}`;
 }
 
+function formatWorkTime(value) {
+  const match = String(value || "").match(/T(\d{2}:\d{2})/);
+  return match ? match[1] : "";
+}
+
+const NPC_LABELS = {
+  george_nelson: "George",
+  miguel_santos: "Miguel",
+  noah_holmes: "Noah",
+  erin_walker: "Erin"
+};
+
+function routineCoworkerSuffix(record) {
+  const names = (record.with || []).map(id => NPC_LABELS[id]).filter(Boolean);
+  return names.length ? `（与 ${names.join("、")}）` : "";
+}
+
+function describeRoutineRecord(record) {
+  if (record.activity_type === "inspection") return `完成 ${record.equipment_id || "设备"} 例行检查，未发现需要处理的异常。${routineCoworkerSuffix(record)}`;
+  if (record.activity_type === "organizing_tools") return `整理常用维修工具与备件。${routineCoworkerSuffix(record)}`;
+  if (record.activity_type === "reading_manual") return record.equipment_id ? `查阅 ${record.equipment_id} 相关设备资料。${routineCoworkerSuffix(record)}` : `查阅维修资料。${routineCoworkerSuffix(record)}`;
+  return "完成一项日常工作。";
+}
+
+function buildTodayKnownExperience({ knowledge = null, routineWork = null, now = new Date() } = {}) {
+  const { date } = localInfo(now);
+  const entries = [];
+  for (const fact of knownWorkFacts(knowledge)) {
+    const snapshot = fact.known_snapshot || {};
+    const completedAt = snapshot.completed_at || snapshot.resolved_at || null;
+    if (!completedAt || !String(completedAt).startsWith(date) || new Date(completedAt) > now) continue;
+    if (!["TASK", "EVENT"].includes(fact.subject_type) || !["DONE", "RESOLVED"].includes(snapshot.status)) continue;
+    entries.push({ source_key: fact.fact_key, at: completedAt, priority: fact.subject_type === "EVENT" ? 3 : 2, text: describeKnownFact(fact, "completed") });
+  }
+  for (const record of routineWork?.records || []) {
+    if (!record.completed_at || !String(record.completed_at).startsWith(date) || new Date(record.completed_at) > now) continue;
+    entries.push({ source_key: record.id, at: record.completed_at, priority: 1, text: describeRoutineRecord(record), started_at: record.started_at });
+  }
+  entries.sort((left, right) => String(right.at).localeCompare(String(left.at)) || right.priority - left.priority);
+  return entries.slice(0, 4).map(entry => ({ ...entry, text: entry.started_at ? `${formatWorkTime(entry.started_at)}–${formatWorkTime(entry.at)}：${entry.text}` : `${formatWorkTime(entry.at)}：${entry.text}` }));
+}
+
 function describeStateChange(state, now) {
   if (state.work_state === "LEAVE") return "今日进入请假状态";
   if (state.work_state === "OVERTIME") return "进入加班工作";
@@ -296,7 +339,7 @@ function describeStateChange(state, now) {
   return "正常班次已结束";
 }
 
-function buildWorkSyncNote({ state = null, knowledge = null, dailyLife = null, now = new Date(), isOnLeave = false, cursor = null, force = false } = {}) {
+function buildWorkSyncNote({ state = null, knowledge = null, dailyLife = null, routineWork = null, now = new Date(), isOnLeave = false, cursor = null, force = false } = {}) {
   const effective = getEffectiveCurrentState({ state, now, isOnLeave });
   if (!effective) return { context: "", cursor: null };
   const signature = stateSyncSignature(effective, now);
@@ -310,7 +353,7 @@ function buildWorkSyncNote({ state = null, knowledge = null, dailyLife = null, n
   if (!firstSync) {
     for (const fact of knownWorkFacts(knowledge)) {
       const at = factTime(fact);
-      if (timestampAfter(at, cursorTime)) recent.push({ at, text: describeRecentKnownFact(fact) });
+      if (timestampAfter(at, cursorTime)) recent.push({ at, text: describeRecentKnownFact(fact), source_key: fact.fact_key });
     }
     const { date } = localInfo(now);
     for (const event of (dailyLife?.events || [])) {
@@ -325,6 +368,8 @@ function buildWorkSyncNote({ state = null, knowledge = null, dailyLife = null, n
   if (!shouldSync) return { context: "", cursor: null };
 
   const progress = buildKnownWorkProgressContext(knowledge);
+  const recentKeys = new Set(recent.slice(-3).map(item => item.source_key).filter(Boolean));
+  const todayExperience = buildTodayKnownExperience({ knowledge, routineWork, now }).filter(item => !recentKeys.has(item.source_key));
   const nowLines = [`- 当前工作状态：${workStateLabel(effective, now)}`, `- 当前阶段：${effective.onboarding_phase || "未知"}`];
   // 午休只提供客观时间边界；不把后台的普通午休 activity 强加为模型当前行为。
   if (effective.work_state !== "LUNCH") {
@@ -335,6 +380,7 @@ function buildWorkSyncNote({ state = null, knowledge = null, dailyLife = null, n
   const lines = ["【工作同步】", "近期："];
   if (recentLines.length) lines.push(...recentLines.map(item => `- ${item}`));
   else lines.push("- 当前工作状态已同步。");
+  if (todayExperience.length) lines.push("今天已发生：", ...todayExperience.map(item => `- ${item.text}`));
   lines.push("现在：", ...nowLines, "后续：", `- ${progress.upcoming}`);
   if (boundary) lines.push("班次边界：", ...boundary.split("\n").map(item => `- ${item.replace(/^-\s*/, "")}`));
   lines.push("事实边界：", "- 工作客观事实以本同步为准；未提供的具体同事、设备、故障、步骤、结果或评价，不要补成已经发生。主观感受和无客观约束的日常行为可自行决定。");
@@ -354,6 +400,7 @@ function prepareWorkSyncContext(now = new Date(), { force = false, channel = "ke
       state,
       knowledge: loadKnowledge(),
       dailyLife: loadDailyLife(),
+      routineWork: loadRoutineWork(),
       now,
       isOnLeave: isOnApprovedLeave(loadLeaves(), date),
       cursor: loadWorkSyncCursor(syncChannel),
@@ -416,6 +463,7 @@ module.exports = {
   buildCurrentWorkContext,
   buildShiftBoundaryContext,
   buildTodayContext,
+  buildTodayKnownExperience,
   getEffectiveCurrentState,
   insertTransientCurrentWorkContext,
   loadCurrentWorkContext,
