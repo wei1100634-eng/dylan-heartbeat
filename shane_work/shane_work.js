@@ -736,10 +736,9 @@ function tickBase(now = new Date()) {
   tasks = taskResult.tasks;
   const routineResult = completeRoutineActivity(state.routine_activity, now, schedule, immediateEvent, taskResult.activeTask, routineStore);
   if (routineResult.changed) saveRoutineWork(routineStore);
-  const discoveredBreakRoom = discoverBreakRoom(state, schedule, onboardingDay);
+  discoverBreakRoom(state, schedule, onboardingDay);
   ensureBreakRoomPersonalFacilities(state);
   let activityState = applyActivity(state, now, schedule, onboardingDay, immediateEvent, taskResult.activeTask);
-  if (discoveredBreakRoom) activityState = { activity: "chatting", location: "BREAK_ROOM", with: ["george_nelson"], current_equipment_id: null, activity_ends_at: null, work_rhythm: "quiet" };
   if (!immediateEvent && !taskResult.activeTask && onboarding.activity) activityState = onboarding.activity;
   let routineActivity = routineResult.routine;
   const continuingLegacyRoutine = !routineActivity && previous?.work_state === "ON_DUTY" && previous.activity === activityState.activity && previous.activity_ends_at === activityState.activity_ends_at && previous.activity_ends_at && new Date(previous.activity_ends_at) > now;

@@ -52,15 +52,14 @@ test("旧 Day2 存档恢复已接触地点，但不自动获得 BREAK_ROOM", () 
   assert.equal(state.onboarding_phase, "GUIDED");
 });
 
-test("Day3 首次午休由 George 带领认识 BREAK_ROOM，并持久化个人设施", () => {
+test("Day3 首个有效午休可独立发现 BREAK_ROOM，并持久化个人设施", () => {
   seedCompletedDay2();
   tick(new Date("2026-09-09T12:30:00+08:00"));
   const state = tick(new Date("2026-09-10T12:30:00+08:00"));
   assert.ok(state.known_location_ids.includes("BREAK_ROOM"));
   assert.deepEqual(state.personal_facilities, { rest_bed_id: "SHANE_BED_04", locker_id: "SHANE_LOCKER_04" });
-  assert.equal(state.location, "BREAK_ROOM");
-  assert.equal(state.activity, "chatting");
-  assert.deepEqual(state.with, ["george_nelson"]);
+  assert.notDeepEqual(state.with, ["george_nelson"]);
+  assert.notEqual(state.activity === "chatting" && state.with.includes("george_nelson"), true);
   assert.equal(state.onboarding_phase, "NORMAL");
 });
 
