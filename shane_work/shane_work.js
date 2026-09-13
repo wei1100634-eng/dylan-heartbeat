@@ -7,7 +7,7 @@ const { advanceSession, applyScheduleOverride } = require("./onboarding_session"
 const { loadTasks, saveTasks } = require("./tasks");
 const { loadWorkHours, saveWorkHours } = require("./work_hours");
 const { loadLeaves, isOnApprovedLeave } = require("./leaves");
-const { loadKnowledge, saveKnowledge, learnFact, learnOnboardingFact, learnLocationFact, learnCoreFacilityFact, learnMealBenefitFact, learnPersonalFacilityFact } = require("./knowledge");
+const { loadKnowledge, saveKnowledge, learnFact, learnOnboardingFact, learnLocationFact, learnCoreFacilityFact, learnMealBenefitFact, learnPersonalFacilityFact, learnNpcFact } = require("./knowledge");
 const { loadWakeRequests, saveWakeRequests, queueWorkWake, queueOnboardingWake } = require("./wake_requests");
 const { ticksDailyLife } = require("./daily_life");
 const { loadRoutineWork, saveRoutineWork, addRoutineRecord } = require("./routine_work");
@@ -200,7 +200,18 @@ function completeRoutineActivity(routine, now, schedule, immediateEvent, activeT
 }
 
 function addKnownPeople(state, ids) {
-  for (const id of ids) if (!state.known_npc_ids.includes(id)) state.known_npc_ids.push(id);
+  for (const id of ids.filter(Boolean)) if (!state.known_npc_ids.includes(id)) state.known_npc_ids.push(id);
+}
+
+function establishOnboardingNpcContacts(state, session) {
+  if ((session?.history || []).some(item => item.step_id === "MEET_ERIN_AND_GEORGE")) addKnownPeople(state, ["erin_walker", "george_nelson"]);
+}
+
+function introduceMiguelDuringFirstNormalShift(state, onboardingDay, schedule, previous, logs, currentTime) {
+  if (onboardingDay < 3 || schedule.workState !== "ON_DUTY" || previous?.work_session || state.known_npc_ids.includes("miguel_santos")) return false;
+  addKnownPeople(state, ["miguel_santos"]);
+  logs.push({ at: currentTime, type: "COWORKER_INTRODUCED", npc_id: "miguel_santos" });
+  return true;
 }
 
 const ONBOARDING_LOCATION_BY_STEP = {
@@ -320,7 +331,6 @@ function createEvent(state, events, now) {
     status: severity === "SERIOUS" ? "SERIOUS_ISSUE" : severity === "NORMAL" ? "FAULT" : "ATTENTION",
     pending_issue: event.event_id
   } : item);
-  addKnownPeople(state, event.assigned_with);
   return event;
 }
 
@@ -453,7 +463,6 @@ function createTask(state, tasks, now, details) {
     activity_ends_at: null, source_event_id: details.source_event_id || null
   };
   state.task_counter = number;
-  addKnownPeople(state, [...task.assigned_with, ...(task.assigned_by ? [task.assigned_by] : [])]);
   return task;
 }
 function hasTaskForEvent(tasks, eventId) { return tasks.some(task => task.source_event_id === eventId); }
@@ -504,6 +513,7 @@ function applyTask(state, tasks, now, schedule, onboardingDay, immediateEvent, l
   const activated = { ...candidate, status: "ACTIVE", started_at: candidate.started_at || startedAt, deferred_at: null, activity_ends_at: formatIsoInTimeZone(addMinutes(now, taskDurationMinutes(candidate))) };
   const index = tasks.findIndex(task => task.task_id === candidate.task_id);
   const next = [...tasks]; next[index] = activated;
+  addKnownPeople(state, activated.assigned_with);
   logs.push({ at: startedAt, type: "TASK_ACTIVE", task_id: activated.task_id, category: activated.category, equipment_id: activated.equipment_id, source_event_id: activated.source_event_id });
   return { tasks: next, activeTask: activated };
 }
@@ -646,7 +656,7 @@ function applyActivity(state, now, schedule, onboardingDay, immediateEvent, acti
   const choice = chooseOnDutyActivity(state, onboardingDay, now);
   if (choice.familiarity_gain) state.equipment = increaseFamiliarity(state.equipment, choice.equipment_id, choice.familiarity_gain);
   state.activity_index = (Number(state.activity_index) || 0) + 1;
-  addKnownPeople(state, choice.with);
+  if (onboardingDay >= 3) addKnownPeople(state, choice.with);
   return { activity: choice.activity, location: choice.location, with: choice.with, current_equipment_id: choice.equipment_id, activity_ends_at: formatIsoInTimeZone(addMinutes(now, choice.duration_minutes)), work_rhythm: choice.rhythm };
 }
 
@@ -692,6 +702,7 @@ function tickBase(now = new Date()) {
     routine_activity: previous?.routine_activity || null
   };
   ensureCoreFacilityLocations(state, onboarding.session);
+  establishOnboardingNpcContacts(state, onboarding.session);
   const events = loadEvents();
   const routineStore = loadRoutineWork();
   let tasks = loadTasks();
@@ -725,6 +736,8 @@ function tickBase(now = new Date()) {
     }
   }
   const immediateEvent = events.find(event => event.status !== "RESOLVED" && event.status !== "WAITING_PARTS") || null;
+  if (immediateEvent && schedule.workState === "ON_DUTY") addKnownPeople(state, immediateEvent.assigned_with);
+  introduceMiguelDuringFirstNormalShift(state, onboardingDay, schedule, previous, logs, currentTime);
   if (!isStartingWorkDay && shouldGenerateTask(state, tasks, now, schedule, onboardingDay)) {
     const plannedTask = createTask(state, tasks, now, chooseTaskDetails(state, now));
     tasks.push(plannedTask);
@@ -861,7 +874,8 @@ next.current_time = currentTime; next.last_tick_at = currentTime; next.equipment
   const mealBenefitKnowledgeChanged = base.onboarding_session?.status === "COMPLETED"
     ? learnMealBenefitFact(knowledge, base.onboarding_session, currentTime)
     : false;
-  let knowledgeChanged = syncCurrentKnowledge(knowledge, events, loadTasks(), base, session, currentTime) || breakRoomKnowledgeChanged || personalFacilityKnowledgeChanged || cafeteriaKnowledgeChanged || coreFacilityKnowledgeChanged || mealBenefitKnowledgeChanged;
+  const npcKnowledgeChanged = base.known_npc_ids.reduce((changed, npcId) => learnNpcFact(knowledge, npcId, currentTime) || changed, false);
+  let knowledgeChanged = syncCurrentKnowledge(knowledge, events, loadTasks(), base, session, currentTime) || breakRoomKnowledgeChanged || personalFacilityKnowledgeChanged || cafeteriaKnowledgeChanged || coreFacilityKnowledgeChanged || mealBenefitKnowledgeChanged || npcKnowledgeChanged;
   let onboardingFact = null;
   if (base.onboarding_session?.history?.length) { onboardingFact = learnOnboardingFact(knowledge, base.onboarding_session, currentTime); knowledgeChanged = true; }
   if (knowledgeChanged) saveKnowledge(knowledge);

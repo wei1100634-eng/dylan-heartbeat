@@ -1,7 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const { runtimeDirectory, writeJsonAtomicSync } = require("../runtime_paths");
-const { COMPANY } = require("./world");
+const { COMPANY, NPCS } = require("./world");
 const WORK_DIR = runtimeDirectory("shane_work", "shane_work");
 const KNOWLEDGE_PATH = path.join(WORK_DIR, "knowledge.json");
 function loadKnowledge() { if (!fs.existsSync(KNOWLEDGE_PATH)) return { schema_version: 1, facts: [] }; try { const value = JSON.parse(fs.readFileSync(KNOWLEDGE_PATH, "utf-8")); return value && Array.isArray(value.facts) ? value : { schema_version: 1, facts: [] }; } catch (error) { console.error("Shane Work 读取 knowledge.json 失败:", error.message); return { schema_version: 1, facts: [] }; } }
@@ -15,4 +15,16 @@ function learnLocationFact(knowledge, locationId, now, learnedAt = now) { const 
 function learnCoreFacilityFact(knowledge, session, now) { const factKey = "ONBOARDING:CORE_FACILITY_AWARENESS"; const index = knowledge.facts.findIndex(fact => fact.fact_key === factKey); if (index >= 0) return false; const completedAt = session?.history?.find(item => item.step_id === "ONBOARDING_COMPLETED")?.occurred_at || now; const snapshot = { label: "生产区域、维修间、仓库、安全出口及主要设备区域的基本划分" }; knowledge.facts.push({ knowledge_id: "KN-" + String(knowledge.facts.length + 1).padStart(6, "0"), fact_key: factKey, subject_type: "FACILITY", source_event_id: null, source_task_id: null, source_onboarding_id: session?.session_id || null, channel: "DIRECT_ONBOARDING", learned_at: completedAt, last_known_at: now, known_snapshot: snapshot }); return true; }
 function learnMealBenefitFact(knowledge, session, now) { const factKey = "ONBOARDING:MEAL_BENEFIT_AWARENESS"; const index = knowledge.facts.findIndex(fact => fact.fact_key === factKey); if (index >= 0) return false; const completedAt = session?.history?.find(item => item.step_id === "ONBOARDING_COMPLETED")?.occurred_at || now; const snapshot = { ...COMPANY.meal_service, included: [...COMPANY.meal_service.included] }; knowledge.facts.push({ knowledge_id: "KN-" + String(knowledge.facts.length + 1).padStart(6, "0"), fact_key: factKey, subject_type: "BENEFIT", source_event_id: null, source_task_id: null, source_onboarding_id: session?.session_id || null, channel: "DIRECT_ONBOARDING", learned_at: completedAt, last_known_at: now, known_snapshot: snapshot }); return true; }
 function learnPersonalFacilityFact(knowledge, facilities, now, learnedAt = now) { const factKey = "PERSONAL_FACILITY_AWARENESS:BREAK_ROOM"; const index = knowledge.facts.findIndex(fact => fact.fact_key === factKey); if (index >= 0) return false; const snapshot = { rest_bed_id: facilities.rest_bed_id, locker_id: facilities.locker_id, label: "4号休息床位和4号储物柜" }; knowledge.facts.push({ knowledge_id: "KN-" + String(knowledge.facts.length + 1).padStart(6, "0"), fact_key: factKey, subject_type: "FACILITY", source_event_id: null, source_task_id: null, source_location_id: "BREAK_ROOM", channel: "DIRECT_PERSONAL_FACILITY", learned_at: learnedAt, last_known_at: now, known_snapshot: snapshot }); return true; }
-module.exports = { loadKnowledge, saveKnowledge, learnFact, learnOnboardingFact, learnLocationFact, learnCoreFacilityFact, learnMealBenefitFact, learnPersonalFacilityFact };
+function learnNpcFact(knowledge, npcId, now, learnedAt = now) {
+  const npc = NPCS.find(item => item.id === npcId);
+  if (!npc) return false;
+  const factKey = "NPC_KNOWN:" + npcId;
+  const index = knowledge.facts.findIndex(fact => fact.fact_key === factKey);
+  if (index >= 0) return false;
+  const relationshipLabels = { george_nelson: "入职阶段带教", erin_walker: "", miguel_santos: "维修同事" };
+  const relationship = Object.hasOwn(relationshipLabels, npcId) ? relationshipLabels[npcId] : "同事";
+  const snapshot = { npc_id: npc.id, name: npc.name, role: npc.role, relationship };
+  knowledge.facts.push({ knowledge_id: "KN-" + String(knowledge.facts.length + 1).padStart(6, "0"), fact_key: factKey, subject_type: "NPC", source_event_id: null, source_task_id: null, source_npc_id: npc.id, channel: "DIRECT_CONTACT", learned_at: learnedAt, last_known_at: now, known_snapshot: snapshot });
+  return true;
+}
+module.exports = { loadKnowledge, saveKnowledge, learnFact, learnOnboardingFact, learnLocationFact, learnCoreFacilityFact, learnMealBenefitFact, learnPersonalFacilityFact, learnNpcFact };

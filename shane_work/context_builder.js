@@ -306,6 +306,12 @@ function buildBaselineAwarenessContext({ state = null, knowledge = null } = {}) 
   if (knownFact(knowledge, "LOCATION_DISCOVERED:CAFETERIA")) lines.push("已知：员工餐厅。");
   if (knownFact(knowledge, "LOCATION_DISCOVERED:BREAK_ROOM")) lines.push("已熟悉：厂内休息室。");
   if (knownFact(knowledge, "PERSONAL_FACILITY_AWARENESS:BREAK_ROOM")) lines.push("个人设施：4号休息床、4号储物柜。");
+  const knownNpcs = (knowledge?.facts || [])
+    .filter(fact => fact.subject_type === "NPC" && /^NPC_KNOWN:/.test(fact.fact_key || ""))
+    .map(fact => fact.known_snapshot || {})
+    .filter(snapshot => snapshot.npc_id && snapshot.name && snapshot.role)
+    .sort((left, right) => ["george_nelson", "erin_walker", "miguel_santos"].indexOf(left.npc_id) - ["george_nelson", "erin_walker", "miguel_santos"].indexOf(right.npc_id));
+  if (knownNpcs.length) lines.push(`已认识的同事：${knownNpcs.map(npc => `${npc.name}（${npc.role}${npc.relationship ? `，${npc.relationship}` : ""}）`).join("；")}。`);
   return lines.join("\n");
 }
 
