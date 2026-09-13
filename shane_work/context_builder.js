@@ -299,6 +299,7 @@ function buildBaselineAwarenessContext({ state = null, knowledge = null } = {}) 
   if (!state?.company || !state?.role) return "";
   const lines = ["【工作基础】", `${state.company}${state.role}。`, "正常班次08:30–12:00、14:30–17:30，12:00–14:30午休。"];
   if (knownFact(knowledge, "ONBOARDING:CORE_FACILITY_AWARENESS")) lines.push("已熟悉：生产区域、维修间、仓库、安全出口及主要设备区域。");
+  if (knownFact(knowledge, "ONBOARDING:WORK_FOUNDATION_AWARENESS")) lines.push("已完成维修部门基础入职培训，了解设备编号、安全、故障上报、维修记录及基础工具流程。");
   if (knownFact(knowledge, "ONBOARDING:MEAL_BENEFIT_AWARENESS")) {
     const meal = COMPANY.meal_service;
     lines.push(`工作日免费早餐${meal.breakfast}、午餐${meal.lunch}；基础餐食、汤、水、咖啡、茶免费。`);

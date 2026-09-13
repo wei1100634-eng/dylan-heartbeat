@@ -7,7 +7,7 @@ const { advanceSession, applyScheduleOverride } = require("./onboarding_session"
 const { loadTasks, saveTasks } = require("./tasks");
 const { loadWorkHours, saveWorkHours } = require("./work_hours");
 const { loadLeaves, isOnApprovedLeave } = require("./leaves");
-const { loadKnowledge, saveKnowledge, learnFact, learnOnboardingFact, learnLocationFact, learnCoreFacilityFact, learnMealBenefitFact, learnPersonalFacilityFact, learnNpcFact } = require("./knowledge");
+const { loadKnowledge, saveKnowledge, learnFact, learnOnboardingFact, learnLocationFact, learnCoreFacilityFact, learnMealBenefitFact, learnWorkFoundationFact, learnPersonalFacilityFact, learnNpcFact } = require("./knowledge");
 const { loadWakeRequests, saveWakeRequests, queueWorkWake, queueOnboardingWake } = require("./wake_requests");
 const { ticksDailyLife } = require("./daily_life");
 const { loadRoutineWork, saveRoutineWork, addRoutineRecord } = require("./routine_work");
@@ -874,8 +874,9 @@ next.current_time = currentTime; next.last_tick_at = currentTime; next.equipment
   const mealBenefitKnowledgeChanged = base.onboarding_session?.status === "COMPLETED"
     ? learnMealBenefitFact(knowledge, base.onboarding_session, currentTime)
     : false;
+  const workFoundationKnowledgeChanged = learnWorkFoundationFact(knowledge, base.onboarding_session, currentTime);
   const npcKnowledgeChanged = base.known_npc_ids.reduce((changed, npcId) => learnNpcFact(knowledge, npcId, currentTime) || changed, false);
-  let knowledgeChanged = syncCurrentKnowledge(knowledge, events, loadTasks(), base, session, currentTime) || breakRoomKnowledgeChanged || personalFacilityKnowledgeChanged || cafeteriaKnowledgeChanged || coreFacilityKnowledgeChanged || mealBenefitKnowledgeChanged || npcKnowledgeChanged;
+  let knowledgeChanged = syncCurrentKnowledge(knowledge, events, loadTasks(), base, session, currentTime) || breakRoomKnowledgeChanged || personalFacilityKnowledgeChanged || cafeteriaKnowledgeChanged || coreFacilityKnowledgeChanged || mealBenefitKnowledgeChanged || workFoundationKnowledgeChanged || npcKnowledgeChanged;
   let onboardingFact = null;
   if (base.onboarding_session?.history?.length) { onboardingFact = learnOnboardingFact(knowledge, base.onboarding_session, currentTime); knowledgeChanged = true; }
   if (knowledgeChanged) saveKnowledge(knowledge);

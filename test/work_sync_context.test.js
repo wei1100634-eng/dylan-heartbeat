@@ -273,7 +273,7 @@ test("基础认知独立于 Work Sync cursor：无 delta 时仍可作为 transie
   reset();
   const baseline = buildBaselineAwarenessContext({
     state: { company: "星果食品有限公司", role: "设备维修技师" },
-    knowledge: { facts: [{ fact_key: "ONBOARDING:MEAL_BENEFIT_AWARENESS" }, { fact_key: "LOCATION_DISCOVERED:CAFETERIA" }] }
+    knowledge: { facts: [{ fact_key: "ONBOARDING:MEAL_BENEFIT_AWARENESS" }, { fact_key: "ONBOARDING:WORK_FOUNDATION_AWARENESS" }, { fact_key: "LOCATION_DISCOVERED:CAFETERIA" }] }
   });
   const initial = prepareWorkSyncContext(at("09:00"));
   markWorkSyncDelivered(initial.cursor, at("09:00"));
@@ -283,10 +283,22 @@ test("基础认知独立于 Work Sync cursor：无 delta 时仍可作为 transie
   const messages = [{ role: "system", content: "人格" }, { role: "user", content: "新窗口第一条消息" }];
   const injected = insertTransientCurrentWorkContext(messages, [baseline, buildObjectiveFactBoundaryContext()].join("\n\n"));
   assert.match(injected.at(-2).content, /^【工作基础】[\s\S]*免费早餐07:45-09:00、午餐11:30-14:00[\s\S]*员工餐厅/);
+  assert.match(injected.at(-2).content, /已完成维修部门基础入职培训/);
   assert.match(injected.at(-2).content, /【事实边界】[\s\S]*未提供的餐食、品质或工作经历不视为已发生/);
   assertFilesUnchanged(before);
   assert.equal(fs.existsSync(paths.kelivoCursor), true);
   assert.equal(fs.existsSync(paths.wakeCursor), false);
+});
+
+test("工作基础认知不受 Kelivo 与 Wake cursor 消费影响", () => {
+  reset();
+  const knowledge = { facts: [{ fact_key: "ONBOARDING:WORK_FOUNDATION_AWARENESS" }] };
+  const state = { company: "星果食品有限公司", role: "设备维修技师" };
+  const wake = prepareWorkSyncContext(at("09:00"), { channel: "wake" });
+  const kelivo = prepareWorkSyncContext(at("09:00"), { channel: "kelivo" });
+  markWorkSyncDelivered(wake.cursor, at("09:00"), "wake");
+  markWorkSyncDelivered(kelivo.cursor, at("09:00"), "kelivo");
+  assert.match(buildBaselineAwarenessContext({ state, knowledge }), /已完成维修部门基础入职培训/);
 });
 
 test("Today Known Experience 至多四条，未来和未知 world 事实不会进入", () => {
