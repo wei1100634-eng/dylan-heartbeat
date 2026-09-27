@@ -78,7 +78,7 @@ test("LEAVE、OVERTIME、CALLED_OUT 与 on-call 使用最终状态优先级", ()
   assert.match(context("18:00", overtime), /加班中[\s\S]*安全截止/);
   assert.doesNotMatch(context("18:00", overtime), /正常班次已结束/);
   const calledOut = { ...base, work_state: "CALLED_OUT", work_session: { type: "CALL_OUT", deadline_at: "2026-09-14T22:00:00+08:00" } };
-  assert.match(context("20:00", calledOut), /被召回工作中[\s\S]*当前处于召回工作/);
+  assert.match(context("20:00", calledOut), /被召回工作中[\s\S]*当前处于临时召回工作；这不代表今天转为完整正常班/);
   const onCall = { ...base, work_state: "OFF_DUTY", activity: "off_duty", location: "OFF_SITE", on_call: true };
   assert.match(context("18:00", onCall), /值班轮值：是（当前未被召回）[\s\S]*正常班次已结束/);
 });

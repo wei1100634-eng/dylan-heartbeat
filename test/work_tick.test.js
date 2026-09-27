@@ -19,6 +19,7 @@ Module._load = function fixtureModuleLoad(request, parent, isMain) {
 };
 const { runtimeDirectory } = require("../runtime_paths");
 const { WORK_TICK_INTERVAL_MS, isWorkTickWindow, runWorkTick, runWakeUp } = require("../wake_up");
+const { tick: tickShaneWork } = require("../shane_work/shane_work");
 Module._load = originalModuleLoad;
 const TIMELINE = path.join(DATA_DIR, "enhanced_messages.json");
 const WORK_DIR = runtimeDirectory("shane_work", "shane_work");
@@ -111,6 +112,35 @@ test("17:30 后结算窗口刷新 OFF_DUTY，重复 tick 不重复工时或工�
   assert.equal(first.state.activity, "off_duty");
   assert.equal(first.hours.filter(item => item.type === "NORMAL").length, 1);
   assert.deepEqual(second, { hours: first.hours, events: first.events, tasks: first.tasks, wake: first.wake });
+});
+
+test("CALL_OUT结束将真实结束原因写入既有工时记录并恢复周末OFF_DUTY", async () => {
+  reset();
+  const stateFile = path.join(WORK_DIR, "state.json");
+  const eventsFile = path.join(WORK_DIR, "events.json");
+  const hoursFile = path.join(WORK_DIR, "work_hours.json");
+  await runWorkTick(new Date("2026-09-21T09:00:00+08:00"));
+  const state = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+  const event = {
+    event_id: "EMERGENCY-CALL-OUT-TEST", category: "OFF_HOURS_CRITICAL", equipment_id: "D02", severity: "SERIOUS",
+    status: "RESOLVED", updated_at: "2026-09-27T10:00:00+08:00", off_hours_emergency: true, on_call_assignee: "shane"
+  };
+  state.work_state = "CALLED_OUT";
+  state.work_session = {
+    session_id: "CALL_OUT-EMERGENCY-CALL-OUT-TEST-2026-09-27T09:00:00+08:00", type: "CALL_OUT", source_event_id: event.event_id,
+    started_at: "2026-09-27T08:30:00+08:00", work_started_at: "2026-09-27T09:00:00+08:00", deadline_at: "2026-09-27T12:00:00+08:00"
+  };
+  fs.writeFileSync(stateFile, JSON.stringify(state));
+  fs.writeFileSync(eventsFile, JSON.stringify([event]));
+
+  tickShaneWork(new Date("2026-09-27T10:05:00+08:00"));
+  const endedState = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+  const hours = JSON.parse(fs.readFileSync(hoursFile, "utf8"));
+  assert.equal(endedState.work_state, "OFF_DUTY");
+  assert.equal(endedState.work_session, null);
+  const record = hours.find(item => item.record_id === state.work_session.session_id);
+  assert.equal(record.end_reason, "RESOLVED");
+  assert.equal(record.ended_at, "2026-09-27T10:05:00+08:00");
 });
 
 test("并发 wake 只允许一次模型调用", async () => {

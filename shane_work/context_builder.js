@@ -7,6 +7,7 @@ const { loadDailyLife, isDailyLifeEventVisible } = require("./daily_life");
 const { loadLeaves, isOnApprovedLeave } = require("./leaves");
 const { loadKnowledge } = require("./knowledge");
 const { loadRoutineWork } = require("./routine_work");
+const { loadWorkHours } = require("./work_hours");
 const { COMPANY } = require("./world");
 
 const TIME_ZONE = resolveTimeZone();
@@ -188,7 +189,7 @@ function buildShiftBoundaryContext({ state = null, now = new Date() } = {}) {
   const lines = ["## 当前时间边界"];
   if (state.work_state === "LEAVE") return `${lines[0]}\n- 今日请假，不进入正常班次。`;
   if (state.work_state === "OVERTIME" || state.work_state === "CALLED_OUT") {
-    lines.push(state.work_state === "OVERTIME" ? "- 当前处于加班工作。" : "- 当前处于召回工作。没有进入普通下班状态。");
+    lines.push(state.work_state === "OVERTIME" ? "- 当前处于加班工作。" : "- 当前处于临时召回工作；这不代表今天转为完整正常班。");
     if (state.work_session?.deadline_at) lines.push(`- 安全截止：${state.work_session.deadline_at}`);
     return lines.join("\n");
   }
@@ -297,7 +298,7 @@ function knownFact(knowledge, factKey) {
 
 function buildBaselineAwarenessContext({ state = null, knowledge = null } = {}) {
   if (!state?.company || !state?.role) return "";
-  const lines = ["【工作基础】", `${state.company}${state.role}。`, "正常班次08:30–12:00、14:30–17:30，12:00–14:30午休。"];
+  const lines = ["【工作基础】", `${state.company}${state.role}。`, "常规班次08:30–12:00、14:30–17:30，12:00–14:30午休；具体今日安排以当前工作状态为准。"];
   if (knownFact(knowledge, "ONBOARDING:CORE_FACILITY_AWARENESS")) lines.push("已熟悉：生产区域、维修间、仓库、安全出口及主要设备区域。");
   if (knownFact(knowledge, "ONBOARDING:WORK_FOUNDATION_AWARENESS")) lines.push("已完成维修部门基础入职培训，了解设备编号、安全、故障上报、维修记录及基础工具流程。");
   if (knownFact(knowledge, "ONBOARDING:MEAL_BENEFIT_AWARENESS")) {
@@ -368,6 +369,62 @@ function buildTodayKnownExperience({ knowledge = null, routineWork = null, now =
   return entries.slice(0, 4).map(entry => ({ ...entry, text: entry.started_at ? `${formatWorkTime(entry.started_at)}–${formatWorkTime(entry.at)}：${entry.text}` : `${formatWorkTime(entry.at)}：${entry.text}` }));
 }
 
+function workSessionEndReason(record, knowledge) {
+  const fact = (knowledge?.facts || []).find(item => item.subject_type === "EVENT" && item.source_event_id === record.source_event_id);
+  const endReason = record.end_reason || (fact?.known_snapshot?.status === "RESOLVED" ? "RESOLVED"
+    : fact?.known_snapshot?.status === "WAITING_PARTS" ? "WAITING_PARTS"
+      : fact?.known_snapshot?.status === "TEMP_FIXED" ? "SAFETY_LIMIT"
+        : null);
+  return ["RESOLVED", "WAITING_PARTS", "SAFETY_LIMIT"].includes(endReason) ? endReason : null;
+}
+
+function describeWorkSessionCompletion(record, state, knowledge) {
+  const endReason = workSessionEndReason(record, knowledge);
+  const label = record.type === "CALL_OUT" ? "本次临时召回" : "本次加班";
+  let text;
+  if (endReason === "RESOLVED") text = `${label}已结束；对应维修事项已完成。`;
+  else if (endReason === "WAITING_PARTS") text = `${label}已结束；维修因等待零件暂停，尚未记录为完成。`;
+  else if (endReason === "SAFETY_LIMIT") text = `${label}处理时段已达安全上限并结束；事项未记录为已修复。`;
+  else return "";
+
+  if (record.type === "CALL_OUT" && state?.work_state === "OFF_DUTY" && !state.work_session) {
+    const hasKnownPendingWork = knownWorkFacts(knowledge).some(fact => {
+      const status = fact.known_snapshot.status;
+      return fact.subject_type === "TASK" ? !["DONE", "CANCELLED"].includes(status) : status !== "RESOLVED";
+    });
+    if (!hasKnownPendingWork) text += state.is_workday ? "当前正常班次已结束，可以离厂。" : "今天仍是休息日，当前没有其他已知工作安排，可以离厂。";
+    else text += "当前已恢复非工作状态；已知后续事项仍按安排处理。";
+  } else if (state?.work_state === "OFF_DUTY" && !state.work_session) {
+    text += "当前加班已结束，已恢复非工作状态。";
+  } else if (state?.work_state === "ON_DUTY") {
+    text += "当前仍处于正常工作时段。";
+  } else if (state?.work_state === "OVERTIME" || state?.work_state === "CALLED_OUT") {
+    text += "当前仍有工作事项进行中。";
+  }
+  return text;
+}
+
+function recentSessionCompletions({ state, knowledge, workHours, cursor, now }) {
+  const cursorTime = cursor?.last_synced_at || null;
+  const fallbackCutoff = now.getTime() - 24 * 60 * 60 * 1000;
+  const knownWorkEventFacts = new Set((knowledge?.facts || [])
+    .filter(fact => fact.subject_type === "EVENT" && ["DIRECT_CALL_OUT", "DIRECT_WORK"].includes(fact.channel))
+    .map(fact => fact.source_event_id));
+  return (workHours || [])
+    .filter(record => ["CALL_OUT", "OVERTIME"].includes(record.type)
+      && record.ended_at && new Date(record.ended_at) <= now
+      && workSessionEndReason(record, knowledge)
+      && knownWorkEventFacts.has(record.source_event_id)
+      && (cursorTime ? timestampAfter(record.ended_at, cursorTime) : Date.parse(record.ended_at) >= fallbackCutoff))
+    .sort((left, right) => String(left.ended_at).localeCompare(String(right.ended_at)))
+    .map(record => ({
+      at: record.ended_at,
+      source_key: `EVENT:${record.source_event_id}`,
+      text: describeWorkSessionCompletion(record, state, knowledge)
+    }))
+    .filter(item => item.text);
+}
+
 function describeStateChange(state, now) {
   if (state.work_state === "LEAVE") return "今日进入请假状态";
   if (state.work_state === "OVERTIME") return "进入加班工作";
@@ -381,7 +438,7 @@ function describeStateChange(state, now) {
   return "正常班次已结束";
 }
 
-function buildWorkSyncNote({ state = null, knowledge = null, dailyLife = null, routineWork = null, now = new Date(), isOnLeave = false, cursor = null, force = false } = {}) {
+function buildWorkSyncNote({ state = null, knowledge = null, dailyLife = null, routineWork = null, workHours = [], now = new Date(), isOnLeave = false, cursor = null, force = false } = {}) {
   const effective = getEffectiveCurrentState({ state, now, isOnLeave });
   if (!effective) return { context: "", cursor: null };
   const signature = stateSyncSignature(effective, now);
@@ -403,6 +460,13 @@ function buildWorkSyncNote({ state = null, knowledge = null, dailyLife = null, r
       if (event.date === date && isDailyLifeEventVisible(event, now) && timestampAfter(at, cursorTime)) recent.push({ at, text: event.summary });
     }
     if (cursor?.state_signature !== signature) recent.push({ at: now.toISOString(), text: describeStateChange(effective, now) });
+  }
+  const completions = recentSessionCompletions({ state: effective, knowledge, workHours, cursor, now });
+  for (const completion of completions) {
+    for (let index = recent.length - 1; index >= 0; index--) {
+      if (recent[index].source_key === completion.source_key) recent.splice(index, 1);
+    }
+    recent.push(completion);
   }
   recent.sort((left, right) => String(left.at).localeCompare(String(right.at)));
   const recentLines = recent.slice(-3).map(item => item.text);
@@ -443,6 +507,7 @@ function prepareWorkSyncContext(now = new Date(), { force = false, channel = "ke
       knowledge: loadKnowledge(),
       dailyLife: loadDailyLife(),
       routineWork: loadRoutineWork(),
+      workHours: loadWorkHours(),
       now,
       isOnLeave: isOnApprovedLeave(loadLeaves(), date),
       cursor: loadWorkSyncCursor(syncChannel),

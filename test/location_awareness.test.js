@@ -251,7 +251,7 @@ test("基础认知只输出已知设施、福利和已知个人设施，不包�
     { fact_key: "LOCATION_DISCOVERED:BREAK_ROOM" },
     { fact_key: "PERSONAL_FACILITY_AWARENESS:BREAK_ROOM" }
   ] } });
-  assert.match(complete, /正常班次08:30–12:00、14:30–17:30，12:00–14:30午休/);
+  assert.match(complete, /常规班次08:30–12:00、14:30–17:30，12:00–14:30午休；具体今日安排以当前工作状态为准/);
   assert.match(complete, /免费早餐07:45-09:00、午餐11:30-14:00/);
   assert.match(complete, /已知：员工餐厅/);
   assert.match(complete, /已熟悉：厂内休息室/);

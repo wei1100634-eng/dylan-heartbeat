@@ -571,9 +571,9 @@ function startWorkSession(type, event, now, delayMinutes = 0) {
   const limitMinutes = type === "OVERTIME" ? 120 : 180;
   return { session_id: type + "-" + event.event_id + "-" + startedAt, type, source_event_id: event.event_id, started_at: startedAt, work_started_at: workStartedAt, deadline_at: formatIsoInTimeZone(addMinutes(new Date(workStartedAt), limitMinutes)) };
 }
-function finishWorkSession(session, hours, now) {
+function finishWorkSession(session, hours, now, endReason = null) {
   const endedAt = formatIsoInTimeZone(now), minutes = Math.max(0, Math.round((now.getTime() - new Date(session.work_started_at).getTime()) / 60000));
-  addHoursRecord(hours, { record_id: session.session_id, type: session.type, date: session.work_started_at.slice(0, 10), started_at: session.work_started_at, ended_at: endedAt, minutes, source_event_id: session.source_event_id });
+  addHoursRecord(hours, { record_id: session.session_id, type: session.type, date: session.work_started_at.slice(0, 10), started_at: session.work_started_at, ended_at: endedAt, minutes, source_event_id: session.source_event_id, ...(endReason ? { end_reason: endReason } : {}) });
 }
 function safelyPauseEvent(events, event, now) {
   const index = events.findIndex(item => item.event_id === event.event_id);
@@ -615,7 +615,10 @@ function applyWorkSession(state, events, hours, now, logs) {
   const expired = new Date(session.deadline_at) <= now;
   if (current.status === "RESOLVED" || current.status === "WAITING_PARTS" || expired) {
     if (expired && current.status !== "RESOLVED" && current.status !== "WAITING_PARTS") safelyPauseEvent(events, current, now);
-    finishWorkSession(session, hours, now);
+    const endReason = current.status === "RESOLVED" ? "RESOLVED"
+      : current.status === "WAITING_PARTS" ? "WAITING_PARTS"
+        : "SAFETY_LIMIT";
+    finishWorkSession(session, hours, now, endReason);
     logs.push({ at: formatIsoInTimeZone(now), type: session.type + "_ENDED", source_event_id: session.source_event_id, reason: expired ? "SAFETY_LIMIT" : current.status });
     return { session: null, activeEvent: null, display: null };
   }
@@ -826,7 +829,10 @@ function tick(now = new Date()) {
     events[index] = active;
     if (active.status === "RESOLVED" || active.status === "WAITING_PARTS" || new Date(session.deadline_at) <= now) {
       if (new Date(session.deadline_at) <= now && active.status !== "RESOLVED" && active.status !== "WAITING_PARTS") safelyPauseEvent(events, active, now);
-      finishWorkSession(session, hours, new Date(session.deadline_at) <= now && active.status !== "RESOLVED" && active.status !== "WAITING_PARTS" ? new Date(session.deadline_at) : now); session = null;
+      const endReason = active.status === "RESOLVED" ? "RESOLVED"
+        : active.status === "WAITING_PARTS" ? "WAITING_PARTS"
+          : "SAFETY_LIMIT";
+      finishWorkSession(session, hours, new Date(session.deadline_at) <= now && active.status !== "RESOLVED" && active.status !== "WAITING_PARTS" ? new Date(session.deadline_at) : now, endReason); session = null;
     }
   }
   if (!session && schedule.workState === "OFF_DUTY" && schedule.isWorkday && getLocalMinutes(now) >= 1050) {

@@ -34,6 +34,7 @@ const paths = {
 };
 
 function at(time) { return new Date(`2026-09-14T${time}:00+08:00`); }
+function sundayAt(time) { return new Date(`2026-09-27T${time}:00+08:00`); }
 function reset() {
   fs.rmSync(DATA_DIR, { recursive: true, force: true });
   fs.mkdirSync(WORK_DIR, { recursive: true });
@@ -97,6 +98,99 @@ test("已发生 Daily Life 可同步，未来 Daily Life 不可见", () => {
   const sync = prepareWorkSyncContext(at("10:30"));
   assert.match(sync.context, /上午有一次短暂休息/);
   assert.doesNotMatch(sync.context, /未来午餐/);
+});
+
+test("CALL_OUT结束以持久工时记录交付明确transition，双cursor独立消费且重启可恢复", () => {
+  reset();
+  const endedAt = "2026-09-27T10:30:00+08:00";
+  update(paths.state, { work_state: "OFF_DUTY", activity: "off_duty", location: "OFF_SITE", with: [], onboarding_phase: "NORMAL", is_workday: false, on_call: true, work_session: null });
+  update(paths.knowledge, { schema_version: 1, facts: [{
+    knowledge_id: "KN-CALL-1", fact_key: "EVENT:EMERGENCY-1", subject_type: "EVENT", source_event_id: "EMERGENCY-1", channel: "DIRECT_CALL_OUT",
+    learned_at: "2026-09-27T09:00:00+08:00", last_known_at: endedAt,
+    known_snapshot: { equipment_id: "D02", category: "OFF_HOURS_CRITICAL", severity: "SERIOUS", status: "RESOLVED", result: "RESOLVED", resolved_at: endedAt }
+  }] });
+  update(paths.hours, [{ record_id: "CALL_OUT-EMERGENCY-1", type: "CALL_OUT", source_event_id: "EMERGENCY-1", started_at: "2026-09-27T09:30:00+08:00", ended_at: endedAt, minutes: 60, end_reason: "RESOLVED" }]);
+  update(paths.kelivoCursor, { schema_version: 2, channel: "kelivo", last_synced_at: "2026-09-27T10:00:00+08:00", state_signature: "during-callout" });
+
+  let kelivo = prepareWorkSyncContext(sundayAt("10:35"), { channel: "kelivo" });
+  assert.match(kelivo.context, /本次临时召回已结束；对应维修事项已完成/);
+  assert.match(kelivo.context, /今天仍是休息日/);
+  assert.match(kelivo.context, /可以离厂/);
+  assert.doesNotMatch(kelivo.context, /距离正常下班|工作到17:30/);
+  markWorkSyncDelivered(kelivo.cursor, sundayAt("10:35"), "kelivo");
+  assert.equal(prepareWorkSyncContext(sundayAt("10:40"), { channel: "kelivo" }).context, "");
+
+  delete require.cache[require.resolve("../shane_work/context_builder")];
+  const restartedBuilder = require("../shane_work/context_builder");
+  const wake = restartedBuilder.prepareWorkSyncContext(sundayAt("10:40"), { channel: "wake" });
+  assert.match(wake.context, /本次临时召回已结束/);
+  assert.match(wake.context, /今天仍是休息日/);
+  assert.equal(JSON.parse(fs.readFileSync(paths.kelivoCursor, "utf8")).last_synced_at, "2026-09-27T02:35:00.000Z");
+  assert.equal(fs.existsSync(paths.wakeCursor), false);
+});
+
+test("CALL_OUT仍进行时不交付结束/离厂transition", () => {
+  reset();
+  update(paths.state, { work_state: "CALLED_OUT", activity: "repairing", location: "FACTORY_FLOOR", with: [], onboarding_phase: "NORMAL", is_workday: false, on_call: true, work_session: { session_id: "CALL-1", type: "CALL_OUT", source_event_id: "EMERGENCY-1", deadline_at: "2026-09-27T12:30:00+08:00" } });
+  update(paths.knowledge, { schema_version: 1, facts: [{ fact_key: "EVENT:EMERGENCY-1", subject_type: "EVENT", source_event_id: "EMERGENCY-1", channel: "DIRECT_CALL_OUT", known_snapshot: { status: "REPAIRING" } }] });
+  update(paths.hours, []);
+  const sync = prepareWorkSyncContext(sundayAt("11:00"));
+  assert.match(sync.context, /被召回工作中/);
+  assert.doesNotMatch(sync.context, /本次临时召回已结束|可以离厂/);
+});
+
+test("CALL_OUT结束但存在已知后续事项时不声称可以离厂", () => {
+  reset();
+  update(paths.state, { work_state: "OFF_DUTY", activity: "off_duty", location: "OFF_SITE", with: [], onboarding_phase: "NORMAL", is_workday: false, on_call: true, work_session: null });
+  update(paths.knowledge, { schema_version: 1, facts: [
+    { fact_key: "EVENT:EMERGENCY-1", subject_type: "EVENT", source_event_id: "EMERGENCY-1", channel: "DIRECT_CALL_OUT", last_known_at: "2026-09-27T10:30:00+08:00", known_snapshot: { status: "RESOLVED", resolved_at: "2026-09-27T10:30:00+08:00" } },
+    { fact_key: "TASK:TASK-2", subject_type: "TASK", source_task_id: "TASK-2", channel: "DIRECT_TASK", last_known_at: "2026-09-27T09:00:00+08:00", known_snapshot: { status: "PLANNED", category: "PLANNED_INSPECTION" } }
+  ] });
+  update(paths.hours, [{ record_id: "CALL_OUT-EMERGENCY-1", type: "CALL_OUT", source_event_id: "EMERGENCY-1", ended_at: "2026-09-27T10:30:00+08:00", end_reason: "RESOLVED" }]);
+  update(paths.kelivoCursor, { schema_version: 2, channel: "kelivo", last_synced_at: "2026-09-27T10:00:00+08:00", state_signature: "during-callout" });
+  const sync = prepareWorkSyncContext(sundayAt("10:35"));
+  assert.match(sync.context, /已知后续事项仍按安排处理/);
+  assert.doesNotMatch(sync.context, /可以离厂/);
+});
+
+test("安全上限结束不伪称故障已修复，正常班次结束仍由原边界文案处理", () => {
+  reset();
+  const endedAt = "2026-09-27T12:30:00+08:00";
+  update(paths.state, { work_state: "OFF_DUTY", activity: "off_duty", location: "OFF_SITE", with: [], onboarding_phase: "NORMAL", is_workday: false, on_call: true, work_session: null });
+  update(paths.knowledge, { schema_version: 1, facts: [{ fact_key: "EVENT:EMERGENCY-1", subject_type: "EVENT", source_event_id: "EMERGENCY-1", channel: "DIRECT_CALL_OUT", known_snapshot: { status: "TEMP_FIXED" } }] });
+  update(paths.hours, [{ record_id: "CALL_OUT-EMERGENCY-1", type: "CALL_OUT", source_event_id: "EMERGENCY-1", ended_at: endedAt, end_reason: "SAFETY_LIMIT" }]);
+  const sync = prepareWorkSyncContext(sundayAt("12:35"));
+  assert.match(sync.context, /安全上限并结束/);
+  assert.match(sync.context, /未记录为已修复/);
+  assert.doesNotMatch(sync.context, /对应维修事项已完成/);
+
+  reset();
+  update(paths.state, { work_state: "OFF_DUTY", activity: "off_duty", location: "OFF_SITE", with: [], onboarding_phase: "NORMAL", is_workday: true, on_call: false, work_session: null });
+  const shiftEnd = prepareWorkSyncContext(at("17:30"), { force: true });
+  assert.match(shiftEnd.context, /正常班次已结束/);
+  assert.doesNotMatch(shiftEnd.context, /本次临时召回已结束/);
+});
+
+test("regression 2026-09-27 周日封口机CALL_OUT上午修复后，16:08仍明确恢复休息日而非等正常打卡", () => {
+  reset();
+  update(paths.state, { work_state: "OFF_DUTY", activity: "off_duty", location: "OFF_SITE", with: [], onboarding_phase: "NORMAL", is_workday: false, on_call: true, work_session: null });
+  update(paths.knowledge, { schema_version: 1, facts: [{
+    fact_key: "EVENT:SEALER-TRIP-20260927", subject_type: "EVENT", source_event_id: "SEALER-TRIP-20260927", channel: "DIRECT_CALL_OUT",
+    last_known_at: "2026-09-27T10:00:00+08:00",
+    known_snapshot: { equipment_id: "SEALER-01", category: "OFF_HOURS_CRITICAL", severity: "SERIOUS", status: "RESOLVED", resolved_at: "2026-09-27T10:00:00+08:00" }
+  }] });
+  update(paths.events, [{ event_id: "SEALER-TRIP-20260927", equipment_id: "SEALER-01", category: "OFF_HOURS_CRITICAL", severity: "SERIOUS", off_hours_emergency: true, on_call_assignee: "shane", status: "RESOLVED", created_at: "2026-09-27T06:50:00+08:00", updated_at: "2026-09-27T10:00:00+08:00" }]);
+  update(paths.hours, [{
+    record_id: "CALL_OUT-SEALER-TRIP-20260927", type: "CALL_OUT", source_event_id: "SEALER-TRIP-20260927",
+    started_at: "2026-09-27T08:00:00+08:00", ended_at: "2026-09-27T10:00:00+08:00", minutes: 120
+  }]);
+  update(paths.kelivoCursor, { schema_version: 2, channel: "kelivo", last_synced_at: "2026-09-27T09:00:00+08:00", state_signature: "CALLED_OUT" });
+
+  const sync = prepareWorkSyncContext(sundayAt("16:08"), { channel: "kelivo" });
+  assert.match(sync.context, /本次临时召回已结束；对应维修事项已完成/);
+  assert.match(sync.context, /今天仍是休息日/);
+  assert.match(sync.context, /当前没有其他已知工作安排，可以离厂/);
+  assert.doesNotMatch(sync.context, /正常班次已结束|距离正常下班|等正常打卡|早退|扣钱|巡检|填单/);
 });
 
 test("跨班次边界会同步，午休无真实事件时不规定具体生活行为", () => {
